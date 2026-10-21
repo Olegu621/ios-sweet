@@ -1,0 +1,34 @@
+diff --git a/arm_vm_init.c b/arm_vm_init.c
+index 6c8f9e1..c9a7bc4 100644
+--- a/arm_vm_init.c
++++ b/arm_vm_init.c
+@@ -1843,7 +1843,19 @@ sweet_early_map_final(void)
+ 	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
+ 	tt_entry_t *slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
+ 	assert(*slot == ARM_TTE_EMPTY);
+-	*slot = 0xe3940000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
++	/*
++	 * The peridot framebuffer (0xe3940000, not 32MB-aligned) spans two L2
++	 * blocks: PA 0xe2000000..0xe6000000. Map both, cleanly aligned, and
++	 * relocate the console at the in-block offset of its first row.
++	 */
++	const vm_map_address_t va2 = va + ARM_TT_L2_SIZE;
++	tt_entry_t *slot2 = &l2[(va2 & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
++	assert(*slot2 == ARM_TTE_EMPTY);
++	*slot = 0xe2000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
++	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
++	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
++	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
++	*slot2 = 0xe4000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
+ 	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
+ 	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
+ 	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
+@@ -2190,7 +2202,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ #if defined(SWEET)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+-	sweet_early_relocate(SWEET_EARLY_FB_VA);
++	sweet_early_relocate(SWEET_EARLY_FB_VA + (0xe3940000ULL - 0xe2000000ULL));
+ #endif
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
+ 
