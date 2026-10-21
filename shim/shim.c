@@ -12,14 +12,18 @@
 #include "loader.h"
 #include "ufs.h"
 
-#define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
+/* peridot (SM8635 "pineapple"): Android 16 runs under Gunyah; the guest FDT
+ * has no IMEM restart_reason@65c (its msm-imem spans only 0x14680000+1K) and
+ * reboot reasons live in PMIC SDAM over SPMI. Park the scratch in low RAM;
+ * resets go out over PSCI instead of PS_HOLD. */
+#define IMEM_RESTART_REASON	0xa9000000UL	/* scratch inside the phase-1 RAM window */
 #define RESTART_BOOTLOADER	0x77665500U
-#define PSHOLD			0x0c264000UL
+#define PSHOLD			0x0c264000UL	/* unused on peridot: PSCI_SYSTEM_RESET */
 
-#define GICD_BASE		0x17a00000UL
-#define GICR_BASE		0x17a60000UL
-#define GICR_SIZE		0x100000UL
-#define GICR_PE_SIZE		0x20000UL
+#define GICD_BASE		0x17100000UL
+#define GICR_BASE		0x17180000UL
+#define GICR_SIZE		0x200000UL
+#define GICR_PE_SIZE		0x40000UL
 #define GICR_TYPER		0x08
 #define GICR_WAKER		0x14
 #define GICR_SGI		0x10000
@@ -30,8 +34,8 @@
 #define GICR_ISPENDR0		(GICR_SGI + 0x200)
 #define GICR_ISACTIVER0		(GICR_SGI + 0x300)
 #define GICR_ICFGR1		(GICR_SGI + 0xc04)
-#define VTIMER_INTID		19	/* DT: <GIC_PPI 3 ...>, not the usual 27 */
-#define PTIMER_INTID		18	/* DT: <GIC_PPI 2 ...> */
+#define VTIMER_INTID		27	/* live FDT: <GIC_PPI 11 ...> */
+#define PTIMER_INTID		30	/* live FDT: <GIC_PPI 14 ...> */
 #define SGI_INTID		1
 
 #define PSCI_VERSION		0x84000000UL

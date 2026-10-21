@@ -10,25 +10,32 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
 
 # Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
-PHYS_BASE = 0xb0000000
-MEM_SIZE = 0x4d000000
+# peridot phase-1 window: the clean low-bank fragment the ABL/Gunyah guest
+# reported as System RAM at 0xa7000000..0xd8000000 (766 MiB). The big
+# permanent boot window comes from --highmem (0x08c0000000 + 3G).
+PHYS_BASE = 0xa7000000
+MEM_SIZE = 0x31000000
 # --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
 # <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed reserved-memory
 # carve-out is in the low bank and the dynamic pools are limited below 4G.
-HIGH_PHYS_BASE = 0x100000000
-HIGH_MEM_SIZE = 0xfcc00000
-# /arm-io children are relative to this; it must not be 0 (serial_init bails)
-SOC_BASE = 0x01000000
+# peridot: the guest-contiguous upper DDR window (Gunyah guest view, 2026-10-21
+# recovery handoff, live FDT fragments: 0x0880000000+0x2f900000,
+# 0x08b0000000+0x7f00000, 0x08b8100000+0x1e00000, 0x08c0000000+0xc0000000).
+HIGH_PHYS_BASE = 0x08c0000000
+HIGH_MEM_SIZE = 0x0c0000000
 
-GICD, GICD_SIZE = 0x17a00000, 0x10000
-GICR, GICR_SIZE = 0x17a60000, 0x100000
-FB, FB_SIZE = 0x9c000000, 0x1700000
+GICD, GICD_SIZE = 0x17100000, 0x10000
+GICR, GICR_SIZE = 0x17180000, 0x200000
+FB, FB_SIZE = 0xe3940000, 0x2b00000
 SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
-FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
+FB_W, FB_H, FB_STRIDE = 1220, 2712, 1220 * 4
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
-VTIMER_INTID = 19
+# peridot live FDT: interrupts = <GIC_PPI 13(sec) 14(ns) 11(virt) 12(hyp)>;
+# INTID = PPI + 16, so the virtual timer lands on 27, the NS physical on 30.
+VTIMER_INTID = 27
+PTIMER_INTID = 30
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27

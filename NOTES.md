@@ -1,5 +1,103 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> THIS CLONE IS THE PERIDOT PORT (POCO F6 / SM8635) — sweet notes below are HISTORY/REFERENCE (project paused ~2026-10-18) <<<
+
+## Agent handoff (peridot, 2026-10-21)
+
+**Goal:** boot real iOS 16.7.16 (iPhone X userland, D22AP) on POCO F6 "peridot" (SM8635,
+Snapdragon 8s Gen 3, platform "pineapple", 12 GB RAM, UFS 4.0). Android 16 (HyperOS
+OS3.0.304.0.WNPMIXM) already flashed; bootloader unlocked. This clone started from the
+sweet repo with peridot constants in place.
+
+**Device facts (observed 2026-10-21, in OrangeFox recovery, uid=0):**
+- model 24069PC21G, USB serial 1f2dfa6d; native root is BROKEN: Magisk app installed but
+  `su` missing for adb shell -> all device work happens via OrangeFox R12.0_2 recovery.
+- OrangeFlashed into `recovery_a` AND `recovery_b` (recovery.img = 104857600 B, boot v4
+  with kernel_size=0 -> `fastboot boot` fails with "Bad Buffer Size"; must flash).
+  Current slot variable: a. Android boot partitions untouched.
+- Fastboot-lock wedge history: both slots were "unbootable" once (touching only recovery
+  images) -> fixed with `fastboot --set-active` a/b/a. Re-triggerable; know the fix.
+- Backups in /tmp/opencode/peridot/backup/ (NOT in git): persist.img 32 MiB,
+  modemst1/2 8 MiB each, fsg 8 MiB, fsc 1 MiB, boot_a/b 96 MiB, vendor_boot_a/b 96 MiB,
+  vbmeta_a/b 128 KiB, dtbo_a/b 24 MiB. persist/modem/persist are precious.
+- USB drops periodically during long flash sessions; mid-stream command drops DO happen
+  (one recovery_a flash died mid-transfer). If fastboot wedges: replug; if still wedged,
+  reboot into recovery/fastboot and retry that single transfer.
+- Display: panel `qcom,mdss_dsi_n16t_42_02_0a_dsc_vid` 1220x2712, splash buffer at
+  0xe3940000 (live FDT cont_splash_region, 0xe34b0000+0x1c350000 reserved). OBSERVATION:
+  0xe3940000 is aligned to NONE of the plausible TTE block granules (2/8/16/32 MiB: base
+  mod 32 MiB = 0x1940000, mod 8 MiB = 0x940000) -> sweet's single-block V=P splash alias
+  base CANNOT point at this exact PA. Plan: band markers (MMU-off) stay usable; MMU-on
+  sweet_early maps V=P 0xe4000000 (32 MiB-aligned alias inside the same splash region,
+  6.75 MiB above the panel read pointer 0xe3940000) and the SHIM (bare metal, MMU off)
+  mirror-copies the console area from PA 0xe4000000 to PA 0xe3940000. Fix or drop that
+  mirroring in a later patch once the kernel console works.
+- Timers: live FDT ARMv8 timer interrupts = GIC_PPI 13/14/11/12 (sec/ns/virt/hyp);
+  VTIMER_INTID = 27, PTIMER_INTID = 30 (sweet each were 19/18 per Qualcomm quirk).
+- GIC: GICD 0x17100000/64 KiB, GICR 0x17180000/2 MiB, PE stride 0x40000 (sweet:
+  0x17a00000/0x17a60000, size 0x100000, PE 0x20000).
+- UFS: ufshc 0x1d84000 (same as sweet; also UFS ICE 0x1d88000, PHY 0x1d80000); device is
+  "1d84000.ufshc" UFS 4.0.
+- Touch: FocalTech FT3683G on a QUP SPI node, compatible "focaltech,n16t-3683g-spi" /
+  "xiaomi,peridot-spi" (live FDT, goodix-style props nearby: irq-gpio 0x16b 0x81,
+  reset-gpio 0x16b 0x80, panel-max-x 0x4c40 — exact meaning TBD).
+  sweet used Goodix on GENI I2C SE7 @0xa84000 @0x5d — peridot needs its own QUP-mapping
+  audit (GENI engine numbers differ on SM8635; find the node's reg + QUP instance).
+- USB 0xa600000/0xa6f8800: same DWC3 wrapper scheme as sweet (QSCRATCH wrapper at
+  +0x4800, GS buses...). 
+- CPU cluster: 8 cores, cpu-map: cluster0 3x A720 (cpu@0..200), cluster1 4x更快
+  (cpu@300..600), cluster2 1x X4 prime (cpu@700). Sweet's homogeneous A55s all 6 —
+  -> for peridot cpus=1 first, later A720 cluster bring-up (X4 prime CPU7 last).
+- RAM 12 GiB: guest memory windows (Gunyah VM "physical" = IPA): low bank frag
+  0x816e0800..0xa6f, 0xa7000000+0x31000000, 0xe34b0000+0x1c350000 (splash), 0xffb80000+0x480000;
+  high: 0x0880000000+0x2f900000, 0x08b0000000+0x7f00000, 0x08b8100000+0x1e00000,
+  0x08c0000000+0x0c0000000 (3 G contiguous) + "0x9_80000000" pair — kernel never used it.
+  iomem (widow for external XPU): also "8c0000000-afe7fefff".
+- **Gunyah**: Android is guest VM (dmesg "Running under Gunyah hypervisor 51/v1"). What
+  happens when shim starts out from ABL (same ABL that boots Android->recovered guest? or
+  does ABL itself rule a different VM?) — UNKNOWN, first boot will tell. If Gunyah guards
+  PSCI/GIC/dram regions, our shim with sweet PSCI/GIC tables must be adjusted.
+- Boot flow detail: phase-1 tests go through `fastboot boot <img>` (ADB partition state
+  untouched). NEVER `fastboot flash boot` — that would break Android boot on next reboot.
+
+**Code changes in this clone (2026-10-21):**
+- tools/mkadt.py: PHYS_BASE/MEM_SIZE -> 0xa7000000/0x31000000 (phase-1 window),
+  --highmem -> 0x08c0000000/0x0c0000000 (3 GiB top bank, contiguous in the guest),
+  GICD/GICR 0x17100000/0x17180000,GICR_SIZE 0x200000, FB 0xe3940000/0x2b00000,
+  FB_W/H/STRIDE 1220/2712/4880, UFS unchanged, VTIMER_INTID 27 (+PTIMER_INTID 30 const).
+- shim/shim.c: GICD/GICR/GICR_SIZE/GICR_PE_SIZE per FDT; VTIMER 27, PTIMER 30;
+  IMEM_RESTART_REASON -> 0xa9000000 (scratch; peridot restart reason is PMIC SDAM,
+  not IMEM; Fastboot-switch via external chain TBD), PSHOLD stays (unused: PSCI).
+- shim/console.h: FB_BASE 0xe3940000, W/H 1220/2712 (panel-native console).
+- xnu/patches 0010+0012: 0x9c000000 -> 0xe3940000, 1080->1220, 2400->2712, 4320->4880,
+  "2680 * 4880" marker band offset = (H-32)*stride. NOTE: patch context lines still
+  reference ARM_TT_L2 32 MiB granularity comment from sweet (see FB alignment above).
+
+**Not done yet / questions:**
+- D22AP artifact (DeviceTree.d22ap.im4p from iPhone X 16.7.16 IPSW): NOT in this clone
+  (kept out of git). Need it to run tools/mkadt.py and assemble the first ADT. Options:
+  (a) ask the user to download the IPSW (iPhone10,3, 16.7.16, ~6 GiB) via
+      tools/remotezip.py; (b) synthesize a minimal iOS ADT for first-boot only.
+- mkadt.py / shim cfg regression check pending (sweet CI q* not available here).
+- QUP/GENI regeneration: peridot touchscreen is FocalTech SPI at an unknown QUP SE
+  (find its QUP node mapping in live.dts: node name from grep "n16t-3683g" and QUP
+  numbering scheme differs from SM7150: check "QUP" regs 0x88c000 family for QUP0..3 SE).
+- Kernel sources: IOS-SWEET fork's xnu-8796 branch — CI builds via gh (per AGENTS).
+  Next kernel stage: build peridot (patch set 0001-0012) & test `fastboot boot` shim blue.
+- SHIM needs "cpus=1" first boot (X4 prime may not boot w/o power-on quirks) — mkiosroot
+  boot args: keep cpus=1 for the very first attempt.
+
+**Concrete next actions (2026-10-21):**
+1. Commit the current constants (mkadt/shim/patches/NOTES).
+2. Ask the user for the D22AP artifact/permission to download the 16.7.16 IPSW
+   (iPhone10,3); with it, produce the first peridot ADT via tools/mkadt.py +
+   shim/out payload build script.
+3. First phone test: shim-only blue-screen `fastboot boot` (no XNU, no ADT needed if we
+   boot the shim with a stub payload; otherwise build ADT after step 2). Expect FB colors
+   at 1220x2712, zero GPU involvement, no timer math yet (19.2 MHz verified off FDT).
+
+## Below: ORIGINAL sweet handoff history (frozen, reference only)
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
@@ -370,6 +468,8 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   even though Group 1 delivery works (RAZ in NS view) - do not use them as a health check.
   INTID 28 shows pending constantly (unknown PPI 12).
 - Timer 19.2 MHz. Qualcomm PPI numbering: secure-phys/phys/virt/hyp = PPI 1/2/3/0 -> vtimer INTID 19, ptimer 18 (NOT 27/30).
+  [PERIDOT 2026-10-21: SM8635 FDT uses sec/ns/virt/hyp = PPI 13/14/11/12 (canonical scheme, +16) -> vtimer 27, ptimer 30.
+  Also above: "INTID 28 pending" — on peridot 28 (= PPI 12, hyp) is a REAL PPI; do NOT assume pending-stuck.]
 - PSCI 1.1 via SMC, SMCCC 1.1. CPU_ON ok; SYSTEM_SUSPEND and SYSTEM_RESET2 unsupported.
 - SMP: CPU_ON works for all 7 secondaries (MPIDR 0x81000n00).
 - Entry EL1, MMU off, x0 = DTB (magic ok). ID_AA64MMFR0 = ...101122: 16K granule YES, 4K YES.
