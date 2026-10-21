@@ -390,6 +390,15 @@ void shim_main(uint64_t dtb)
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
+	/* Loader diagnostics scroll off the 64-row panel quickly. When the loader
+	 * refuses (why != NULL) the jump never happens, so hold the whole report
+	 * on screen forever for reading; on success it jumps to xnu inside
+	 * loader_boot and never reaches this. */
+	if ((uintptr_t)why != 0) {
+		con_str("HOLD", "libre reading: this report stays");
+		for (;;)
+			delay_ms(1000);
+	}
 
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";

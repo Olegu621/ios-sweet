@@ -10,12 +10,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
 
 # Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
-# peridot phase-1 window: the ABL hands the boot ramdisk at 0xab000000 (seen live
-# 2026-10-21: "IMAGE lo=ab000000"), and the passed DTB lands ~0xb6e25000 — both
-# inside a naive low window. Keep kernel-managed RAM ABOVE the payload/DTB:
-# 0xac000000..0xd8000000 (192 MiB) for phase-1; the big permanent window comes
-# from --highmem (0x08c0000000 + 3 G).
-PHYS_BASE = 0xac000000
+# peridot phase-1 window: the ABL hands out (seen live 2026-10-21):
+#   SHIM image   0xab000000 + 256 KiB ("IMAGE lo/hi" mmu row)
+#   initrd       0xb7026000..0xb7ffe050 (16.57 MiB payload; "INITRD lo/hi")
+#   DTB          ~0xb6e25000
+# → kernel-managed RAM starts at 0xb8000000 (512 MiB window up to 0xd8000000).
+# The big permanent window stays in --highmem (0x08c0000000 + 3 G).
+PHYS_BASE = 0xb8000000
 MEM_SIZE = 0x0c000000
 # --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
 # <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed reserved-memory

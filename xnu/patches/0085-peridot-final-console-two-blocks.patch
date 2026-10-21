@@ -1,7 +1,7 @@
-diff --git a/arm_vm_init.c b/arm_vm_init.c
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index 6c8f9e1..c9a7bc4 100644
---- a/arm_vm_init.c
-+++ b/arm_vm_init.c
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
 @@ -1843,7 +1843,19 @@ sweet_early_map_final(void)
  	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
  	tt_entry_t *slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
