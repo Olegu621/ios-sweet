@@ -108,6 +108,19 @@ sweet repo with peridot constants in place.
    console markers 'arm64_start'/'start_first_cpu' markers; if the band positions look off,
    revisit 0010 MOV64 (2680*4880 row math), we calculated from panel 2712 rows.
 
+6. (2026-10-21 ~12:15) Patch-set validation: apple-oss xnu tag **xnu-8796.141.3**
+   (= macOS 13.5 via distribution-macOS release.json, matches the workflow's
+   MACOS_VERSION=13.5; see /tmp/opencode/xnu-pre, working tree /tmp/opencode/xnu-wt):
+   patches 0001..0012 apply CLEANLY in order in a fresh tree (0006 has harmless trailing-
+   whitespace warnings). No hard-coded sweet phys values in patched arm64 sources except the
+   peridet-updated 0xe3940000 in arm_vm_init.c / sweet_early.c (0011's physmap padding math
+   versus peridot 0xa7000000 stage window still to be re-checked at runtime).
+   mkpayload dry-run OK with a dummy kernel: SWEETXNU header, peridot ADT 0x12d0/0x312c bytes,
+   phys_base 0xa7000000/0x31000000. gh CLI 2.66.0 installed (/usr/local/bin/gh); NOT yet
+   authenticated. NEXT user action: `gh auth login` (browser code). Then: fork, push main,
+   enable Actions, `gh workflow run xnu.yml`. The workflow pushes buildtree.tgz + kernel.*
+   artifacts for local single-file compiles too.
+
 ## Below: ORIGINAL sweet handoff history (frozen, reference only)
 
 ## Agent handoff / active work (2026-10-15, latest)
