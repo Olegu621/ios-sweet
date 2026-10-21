@@ -167,6 +167,43 @@ sweet repo with peridot constants in place.
       after a confirmed phase-2 boot; NOT flashing anything yet.
     - xnu buildtree artifact /tmp/opencode/xnu-art/xnu-buildtree/buildtree.tgz saved.
 
+11. Phase-2 loader path (2026-10-21 afternoon):
+    - Shim loader HOLD-on-fail committed (e56e239): loader reason now stays on screen forever
+      (`(uintptr_t)why != 0 -> con_str HOLD ... for(;;) delay_ms`). Reason screen read on 0037p5:
+      "ramdisk overlaps kernel memory", INITRD lo=B7026000 hi=B7FFE050 — ABL ramdisk is INSIDE
+      the 0xac000000 window. FIX (e56e239): mkadt PHYS_BASE/MEM_SIZE -> 0xb8000000/0x0c000000.
+      payload-0037p6 (phys 0xb8000000, mem 0xc000000, entry 0xfffffe000748b488) + shim-boot-0037p6
+      (sha 8ad76920) BOOTED XNU.
+    - XNU own blue fbcon panic (0037p6): "SWEET EARLY PANIC: Synchronous exception taken while
+      SP1 selected at pc 0xfffffe000748004c, lr same, saved state 0xfffffe0000061300",
+      esr=0x96000006 far=0x220. pc = _current_percpu_base+0xc = `bl _current_thread;
+      ldr x0,[x0,#0x220]`; TPIDR_EL1 = 0 (start.s `msr TPIDR_EL1, xzr`) -> read [0+0x220] abort.
+      Path: fleh_synchronous_sp1 -> sleh_synchronous_sp1 -> panic_with_thread_kernel_state.
+    - Patch 0082 (superseded) then 0083-peridot-early-panic-once-trace.patch: sweet_early.c
+      sweet_early_hex/dec/trace (walk fp chain, print caller LRs), trace-once gate +
+      re-entry guard, sweet_early_panic_started(), sleh pwtk_state freezes via wfe if a panic
+      is already running. Commit 523ff3a (0082 dropped, 0083 kept).
+    - Boot 0040p (0082 kernel, CI 39604941503 screen): repeated identical TRACE chains =
+      nested faults. Symbolized on real trace data: "panic_trap_to_debugger+0x70" contains
+      `bl _current_percpu_base` at +0x6c — the panic path itself re-faults forever; register
+      dump = the FIRST fault (pc=current_percpu_base+0xc).
+    - Boot 0041p (0083 kernel, CI 39624061002): ONE trace line, stage S1:
+      "TRACE S1 ... arm_init+0x4c ..." — the return address after `bl _sweet_early_mark`
+      at arm_init+0x48!! => the original fault is INSIDE sweet_early_mark(1), which is called
+      right at arm_init start; the percpu panic dump was only the nested smoke.
+    - ROOT CAUSE (0084, commit 3375d0e): patch0010's start.s inject maps ONE 32MB Normal-NC
+      block for the fb (stored RAW 0xe3940000|flags -> decoded PA base 113<<25 = 0xe2000000,
+      VA window 0xe2000000..0xe4000000). sweet_early_mark(1)'s FIRST op = stage band at
+      fb rows 2680..2712 = PA 0xe4518000..0xe45e1180 -> ABOVE 0xe4000000 -> unmapped -> TLB
+      fault on the very first console action. (Residue bits land in the descriptor's reserved
+      field; harmless on ARM.) Peridot fb 0xe3940000 is NOT 32MB-aligned and spans
+      13.2MB => needs TWO blocks: bases 0xe2000000 (slot 113) AND 0xe4000000 (slot 114).
+      0084-peridot-fb-two-l2-blocks.patch adds the second (rebuild of the same flags MOV64).
+    - KNOWN-NEXT: patch0012's sweet_early_map_final (physmap alias VA VM_MIN+32MB) maps ONE
+      block desc 0xe3940000 RAW -> decoded 0xe2000000; relocated console writes
+      physmap_va+row map PA 0xe2000000+row (13MB below fb — INVISIBLE writes, no fault, but
+      likely wrong address); fix AFTER seeing how far boot goes with 0084.
+
 ## Below: ORIGINAL sweet handoff history (frozen, reference only)
 
 ## Agent handoff / active work (2026-10-15, latest)
