@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index ce32930..e4a36dc 100644
+index ce32930..170de1b 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -59,6 +59,10 @@ extern void sweet_usb_probe(void);
@@ -22,7 +22,7 @@ index ce32930..e4a36dc 100644
  #define CAP_64AS        (1u << 24)              /* 64-bit DMA addressing */
  
  #define UFS_BLOCK       4096u
-@@ -362,6 +368,63 @@ ufs_find_partition(const char *want)
+@@ -362,6 +368,65 @@ ufs_find_partition(const char *want)
  	return ENOENT;
  }
  
@@ -34,18 +34,25 @@ index ce32930..e4a36dc 100644
 +static uint32_t
 +ufs_uic(uint32_t cmd, uint32_t arg0)
 +{
++	/* IS bits only set while the matching IE bit is one: enable completion. */
++	ufs_wr(REG_IE, IS_UICCMD_COMP);
 +	ufs_wr(REG_UICCMDARG0, arg0);
 +	ufs_wr(REG_UICCMDARG1, 0);
 +	ufs_wr(REG_UICCMDARG2, 0);
 +	ufs_wr(REG_UICCMD, cmd);
++	uint32_t is = 0;
 +	for (int i = 0; i < 2000000; i++) {
-+		if ((ufs_rd(REG_IS) & IS_UICCMD_COMP) != 0) {
++		is = ufs_rd(REG_IS);
++		if ((is & IS_UICCMD_COMP) != 0) {
 +			uint32_t result = ufs_rd(REG_UICCMDARG0);
 +			ufs_wr(REG_IS, IS_UICCMD_COMP);
++			ufs_wr(REG_IE, 0);
 +			return result;
 +		}
 +		delay(1);
 +	}
++	ufs_wr(REG_IE, 0);
++	printf("SWEET UFS: UIC cmd 0x%x timed out (IS 0x%x)\n", cmd, is);
 +	return 0xffffffffu;
 +}
 +
@@ -58,27 +65,22 @@ index ce32930..e4a36dc 100644
 +static int
 +ufs_link_init(void)
 +{
-+	uint32_t r = ufs_uic(0x16, 0);          /* DME LINK STARTUP */
-+	printf("SWEET UFS: DME LINK STARTUP result 0x%x\n", r);
-+	if ((r != 0xffffffffu) && ((r & 0xffff) == 0)) {
-+		return 0;
-+	}
-+	printf("SWEET UFS: HCE reset\n");
-+	ufs_wr(REG_HCE, 0);
-+	for (int i = 0; i < 100000; i++) {
-+		delay(1);
-+	}
-+	ufs_wr(REG_HCE, 1);
-+	uint32_t hcs = 0;
-+	for (int i = 0; i < 1000000; i++) {
-+		hcs = ufs_rd(REG_HCS);
-+		if (hcs & HCS_DP) {
-+			break;
++	printf("SWEET UFS: IS 0x%x IE 0x%x HCS 0x%x\n", ufs_rd(REG_IS),
++	    ufs_rd(REG_IE), ufs_rd(REG_HCS));
++	uint32_t r = ufs_uic(0x14, 0);          /* DME RESET */
++	printf("SWEET UFS: DME RESET result 0x%x IS 0x%x\n", r, ufs_rd(REG_IS));
++	if (r != 0xffffffffu) {
++		uint32_t hcs = 0;
++		for (int i = 0; i < 1000000; i++) {
++			hcs = ufs_rd(REG_HCS);
++			if (hcs & HCS_UCRDY) {
++				break;
++			}
++			delay(1);
 +		}
-+		delay(1);
++		printf("SWEET UFS: HCS after DME RESET 0x%x\n", hcs);
 +	}
-+	printf("SWEET UFS: HCS after HCE reset 0x%x\n", hcs);
-+	r = ufs_uic(0x16, 0);
++	r = ufs_uic(0x16, 0);                   /* DME LINK STARTUP */
 +	printf("SWEET UFS: DME LINK STARTUP result 0x%x\n", r);
 +	return ((r != 0xffffffffu) && ((r & 0xffff) == 0)) ? 0 : ENXIO;
 +}
@@ -86,7 +88,7 @@ index ce32930..e4a36dc 100644
  static int
  ufs_take_over_host(void)
  {
-@@ -632,6 +695,9 @@ sweet_ufs_init(void)
+@@ -632,6 +697,9 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
