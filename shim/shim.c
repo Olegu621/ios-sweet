@@ -16,7 +16,7 @@
  * has no IMEM restart_reason@65c (its msm-imem spans only 0x14680000+1K) and
  * reboot reasons live in PMIC SDAM over SPMI. Park the scratch in low RAM;
  * resets go out over PSCI instead of PS_HOLD. */
-#define IMEM_RESTART_REASON	0xa9000000UL	/* scratch inside the phase-1 RAM window */
+#define IMEM_RESTART_REASON	0xa9000000UL	/* scratch inside the phase-1 RAM window; written only by the shim's own reset path */
 #define RESTART_BOOTLOADER	0x77665500U
 #define PSHOLD			0x0c264000UL	/* unused on peridot: PSCI_SYSTEM_RESET */
 

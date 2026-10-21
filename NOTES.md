@@ -121,6 +121,52 @@ sweet repo with peridot constants in place.
    enable Actions, `gh workflow run xnu.yml`. The workflow pushes buildtree.tgz + kernel.*
    artifacts for local single-file compiles too.
 
+7. (2026-10-21 ~13:15) GH auth DONE (user Olegu621; token scopes repo,workflow,read:org).
+   Fork https://github.com/Olegu621/ios-sweet exists (created, Actions permissions enabled via
+   api). Repo pushed: Olegu621/ios-sweet (origin) <- 3 commits (d8a73c0, a4f8fb8, cf8a237).
+   CI: run 39577576237 SUCCESS in 8m3s (the push run 39577569867 cancelled by concurrency).
+   Kernel artifact: /home/admin/ios-peridot/xnu/out/kernel-0037peridot (17 MB arm64 Mach-O,
+   cputype 0x100000c — PLAN arm64, no-PAC). Also buildtree tgz at /tmp/opencode/xnu-art.
+
+8. Phase-2a boot 0037p (shim-boot-0037p.img sha 74f52af8, cmd cpus=1 debug=0xc keepsyms=1
+   -enable_kprintf_spam -noprogress rd=md0):
+   USER-TRANSCRIBED full shim screen (2026-10-21 ~12:50): DTB at=B6E25000 magic=D00DFEED;
+   IMAGE lo=AB000000 hi=AB040000; MMU rc=0 l3=1; TTBR0 pa=AB01B000; PARANGE mmfr0=2,
+   tg16=1; PAR img/fb/gic/12G rows; FILL us ~0x45D97→0x45E2D; MEM us 0x9C52→0x12B;
+   PSCI ver=1.1 smccc=1.3; GICD was=D0 now=D3; GICR base=17180000 waker=0; ENABLE
+   was=0 now=48000002 (SGI1|VTIMER27|PTIMER30) — CONFIRMS peridot INTID map; VTIMER
+   irqs=0x1E (30 in the 300 ms window = ~100 Hz); SGI1 irqs=0xA; DONE holding 3 min.
+   → ROOT CAUSE of "no XNU": the shim's loader returned "ramdisk overlaps kernel
+   memory" — ABL places the boot-image ramdisk at PA 0xab000000, which was INSIDE the
+   0xa7000000..0xd8000000 window (LOADFIT: phys_base from ADT 0xa7000000+0x31000000,
+   the payload's boot ramdisk lands at ABL's hardcoded 0xab000000; overlap ⇒ refuse).
+
+9. Fixes (2026-10-21 ~13:12):
+   a. tools/mkadt.py: PHYS_BASE/MEM_SIZE → 0xac000000/0x0c000000 (192 MiB window above
+      the 0xab000000 ABL ramdisk placement; DTB lands ~0xb6e25000 and stays outside).
+   b. shim/mmu.h: FB_PHYS 0x9c000000 → 0xe3940000 (peridot splash direct area for the
+      PAR probe; probe wrote nb with an old addr but didn't affect drawing).
+   c. Shim's "reset after the UFS probe" (delay 3 min twist) removed — flow reaches DONE.
+   192 MiB for a 17 MB kernelcache is tight but fine for phase-2; reconsider бо set the
+   window higher (or add a second phys fragment in the ADT) before phase-3.
+   new image: shim/out/shim-boot-0037p2.img (sha 697ee604). mkpayload 10 segs first
+   (nsegs=10) payload/0037p2, virt_base 0xfffffe0006000000, entry 0xfffffe000748b488.
+   fastboot boot dispatch took rc=0 BUT phone state at the time of "se院a" unknown
+   (user left; phone in hand). NEXT SESSION: re-run its boot 0037p2 and OBSERVE:
+   a "yellow/green spawn" shim, then a jump: expect 0010's white 64x32 band on the
+   splash (PA 0xe3940000 between rows 2680-2712), XNU own sweet-fbcon output, and/or
+   a PANIC printed inside XNU's own fbcon. If the phone black-screens, grab the exec
+   handler rows and re-read from there.
+
+10. Background prep done (no phone needed):
+    - Full 16.7.16 iPhone10,3 IPSW (20H392) downloading in bg to
+      research/ipsw-x/ipsw-20H392.ipsw (gitignored; 6+ GiB; ~10 min at repo line speed).
+      Log: /tmp/opencode/ipsw-download.log. NEXT: tools/mkiosroot.sh to build the HFS+
+      root (build v1 = the "phase-3" userland mirror of sweet v12 image flow:
+      mkiosroot.sh <ipsw>.ipsw <out.dir>); rootfs will land in /userdata partition only
+      after a confirmed phase-2 boot; NOT flashing anything yet.
+    - xnu buildtree artifact /tmp/opencode/xnu-art/xnu-buildtree/buildtree.tgz saved.
+
 ## Below: ORIGINAL sweet handoff history (frozen, reference only)
 
 ## Agent handoff / active work (2026-10-15, latest)
