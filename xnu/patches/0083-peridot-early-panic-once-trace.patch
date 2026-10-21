@@ -1,0 +1,168 @@
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 24f1abc..5731d18 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -39,6 +39,10 @@
+ #include <arm64/monotonic.h>
+ #include <arm64/instructions.h>
+ 
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#endif
++
+ #include <kern/debug.h>
+ #include <kern/restartable.h>
+ #include <kern/socd_client.h>
+@@ -463,6 +467,24 @@ arm64_platform_error(arm_saved_state_t *state, uint32_t esr, vm_offset_t far, pl
+ void
+ panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
+ {
++#if defined(SWEET)
++	if (sweet_early_panic_started()) {
++		/*
++		 * peridot: a fault taken while the panic path itself is
++		 * running loops forever (panic_trap_to_debugger walks the
++		 * per-cpu data with TPIDR_EL1 still zero).  Freeze instead.
++		 */
++		for (;;) {
++			__asm__ volatile("wfe");
++		}
++	}
++	/*
++	 * peridot: caller chain straight from the saved frame pointers.
++	 * Print it before anything else so a nested fault cannot pre-empt
++	 * it; the early console's once-only gate makes re-entry safe.
++	 */
++	sweet_early_trace(saved_state64(ss)->fp);
++#endif
+ 	boolean_t ss_valid;
+ 
+ 	ss_valid = is_saved_state64(ss);
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index cac7201..e568171 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -10,6 +10,7 @@
+ #if defined(SWEET)
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
++#include <mach/vm_types.h>
+ 
+ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0xe3940000;
+ #define EARLY_FB early_fb
+@@ -27,6 +28,7 @@ extern unsigned char iso_font[256 * 16];
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+ static unsigned int early_started, early_disabled, early_panicking;
++static unsigned int early_last_stage;
+ 
+ static void
+ sweet_early_clear_row(void)
+@@ -89,6 +91,7 @@ sweet_early_string(const char *s)
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
++	early_last_stage = stage;
+ 	if (early_disabled || stage > 20) {
+ 		return;
+ 	}
+@@ -140,4 +143,84 @@ sweet_early_disable(void)
+ 	early_disabled = 1;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
++
++void
++sweet_early_hex(unsigned long long v)
++{
++	static const char digits[] = "0123456789abcdef";
++	char buf[24];
++	int i = 23;
++
++	buf[0] = '0';
++	buf[1] = 'x';
++	do {
++		buf[--i] = digits[v & 0xf];
++		v >>= 4;
++	} while (v != 0 && i > 2);
++	sweet_early_string(&buf[i]);
++}
++
++void
++sweet_early_dec(unsigned long v)
++{
++	char buf[24];
++	int i = 23;
++
++	if (v == 0) {
++		sweet_early_string("0");
++		return;
++	}
++	while (v != 0) {
++		buf[--i] = (char)('0' + v % 10);
++		v /= 10;
++	}
++	sweet_early_string(&buf[i]);
++}
++
++/*
++ * Caller chain of the faulting frame: fp_i holds the caller's LR at
++ * fp_i+8 and the next frame pointer at fp_i.  Printed once, for the
++ * first panic only, so the original chain can not be scrolled off by
++ * the nested faults the panic path itself takes while it walks the
++ * per-cpu data with TPIDR_EL1 still zero.  A read that faults re-enters
++ * sleh; the re-entry guard makes the nested walk a no-op.
++ */
++void
++sweet_early_trace(vm_offset_t fp)
++{
++	static unsigned int tracing;
++	int depth;
++
++	if (tracing != 0 || early_panicking != 0) {
++		return;
++	}
++	tracing = 1;
++	sweet_early_string("\nTRACE S");
++	sweet_early_dec(early_last_stage);
++	sweet_early_putc(' ');
++	for (depth = 0; depth < 8; depth++) {
++		vm_offset_t lr;
++		vm_offset_t next;
++
++		if (fp < 0xfffffe0000000000ULL || fp > 0xfffffeff00000000ULL) {
++			break;
++		}
++		lr = *(vm_offset_t *)(fp + 8);
++		next = *(vm_offset_t *)fp;
++		sweet_early_hex(lr);
++		sweet_early_putc(' ');
++		if (next <= fp) {
++			break;
++		}
++		fp = next;
++	}
++	sweet_early_putc('\n');
++	tracing = 0;
++}
++
++int
++sweet_early_panic_started(void)
++{
++	return early_panicking != 0;
++}
+ #endif /* SWEET */
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d7a25f2..3f8ec9e 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -10,6 +10,10 @@
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
++void sweet_early_hex(unsigned long long v);
++void sweet_early_dec(unsigned long v);
++void sweet_early_trace(vm_offset_t fp);
++int sweet_early_panic_started(void);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
+ #else
