@@ -1,0 +1,34 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 170de1b..b8e580f 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -399,16 +399,23 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
+ }
+ 
+ /*
+- * After some bootloader states (observed after a large fastboot flash: CAP
+- * 0xD5C7031F instead of 0x1587031F, CHECK-CONDITION responses with all-zero
+- * sense data) the UIC link is no longer established. DME LINK STARTUP (0x16),
+- * with an HCE power cycle when it is refused, brings it back. Always run once.
++ * The SCSI path through the UTR list is the only judge of a healthy device:
++ * any TEST UNIT READY answer (GOOD, or a refusing CHECK CONDITION) proves the
++ * UIC link and the UTP layer are alive, and DME link commands play no part in
++ * that state. UIC commands even never complete on this controller after the
++ * bootloader (observed on 0051p: DME RESET/LINK STARTUP time out with IS 0),
++ * so run them only for a doorbell that never clears.
+  */
+ static int
+ ufs_link_init(void)
+ {
+-	printf("SWEET UFS: IS 0x%x IE 0x%x HCS 0x%x\n", ufs_rd(REG_IS),
+-	    ufs_rd(REG_IE), ufs_rd(REG_HCS));
++	static const uint8_t tur[6] = { 0x00 };
++	int rc = ufs_scsi(tur, sizeof(tur), 0, false);
++	if (rc != ETIMEDOUT) {
++		return rc;
++	}
++	printf("SWEET UFS: SCSI unreachable, UIC link init (IS 0x%x IE 0x%x HCS 0x%x)\n",
++	    ufs_rd(REG_IS), ufs_rd(REG_IE), ufs_rd(REG_HCS));
+ 	uint32_t r = ufs_uic(0x14, 0);          /* DME RESET */
+ 	printf("SWEET UFS: DME RESET result 0x%x IS 0x%x\n", r, ufs_rd(REG_IS));
+ 	if (r != 0xffffffffu) {
