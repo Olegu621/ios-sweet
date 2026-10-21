@@ -1,0 +1,98 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index ce32930..e4a36dc 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -59,6 +59,10 @@ extern void sweet_usb_probe(void);
+ #define REG_IE          0x24
+ #define REG_HCS         0x30
+ #define REG_HCE         0x34
++#define REG_UICCMD      0x10
++#define REG_UICCMDARG0  0x14
++#define REG_UICCMDARG1  0x18
++#define REG_UICCMDARG2  0x1c
+ #define REG_UTRLBA      0x50
+ #define REG_UTRLBAU     0x54
+ #define REG_UTRLDBR     0x58
+@@ -67,6 +71,8 @@ extern void sweet_usb_probe(void);
+ 
+ #define HCS_DP          (1u << 0)
+ #define HCS_UTRLRDY     (1u << 1)
++#define HCS_UCRDY       (1u << 3)
++#define IS_UICCMD_COMP  (1u << 10)
+ #define CAP_64AS        (1u << 24)              /* 64-bit DMA addressing */
+ 
+ #define UFS_BLOCK       4096u
+@@ -362,6 +368,63 @@ ufs_find_partition(const char *want)
+ 	return ENOENT;
+ }
+ 
++/*
++ * UIC commands (JEDEC UFSHCI 2.1): command at 0x10, args at 0x14/0x18/0x1c,
++ * completion is IS bit 10 (0x400), the result word is UICCMDARG0 low 16 bits.
++ * Returns the full UICCMDARG0 or 0xffffffff on timeout.
++ */
++static uint32_t
++ufs_uic(uint32_t cmd, uint32_t arg0)
++{
++	ufs_wr(REG_UICCMDARG0, arg0);
++	ufs_wr(REG_UICCMDARG1, 0);
++	ufs_wr(REG_UICCMDARG2, 0);
++	ufs_wr(REG_UICCMD, cmd);
++	for (int i = 0; i < 2000000; i++) {
++		if ((ufs_rd(REG_IS) & IS_UICCMD_COMP) != 0) {
++			uint32_t result = ufs_rd(REG_UICCMDARG0);
++			ufs_wr(REG_IS, IS_UICCMD_COMP);
++			return result;
++		}
++		delay(1);
++	}
++	return 0xffffffffu;
++}
++
++/*
++ * After some bootloader states (observed after a large fastboot flash: CAP
++ * 0xD5C7031F instead of 0x1587031F, CHECK-CONDITION responses with all-zero
++ * sense data) the UIC link is no longer established. DME LINK STARTUP (0x16),
++ * with an HCE power cycle when it is refused, brings it back. Always run once.
++ */
++static int
++ufs_link_init(void)
++{
++	uint32_t r = ufs_uic(0x16, 0);          /* DME LINK STARTUP */
++	printf("SWEET UFS: DME LINK STARTUP result 0x%x\n", r);
++	if ((r != 0xffffffffu) && ((r & 0xffff) == 0)) {
++		return 0;
++	}
++	printf("SWEET UFS: HCE reset\n");
++	ufs_wr(REG_HCE, 0);
++	for (int i = 0; i < 100000; i++) {
++		delay(1);
++	}
++	ufs_wr(REG_HCE, 1);
++	uint32_t hcs = 0;
++	for (int i = 0; i < 1000000; i++) {
++		hcs = ufs_rd(REG_HCS);
++		if (hcs & HCS_DP) {
++			break;
++		}
++		delay(1);
++	}
++	printf("SWEET UFS: HCS after HCE reset 0x%x\n", hcs);
++	r = ufs_uic(0x16, 0);
++	printf("SWEET UFS: DME LINK STARTUP result 0x%x\n", r);
++	return ((r != 0xffffffffu) && ((r & 0xffff) == 0)) ? 0 : ENXIO;
++}
++
+ static int
+ ufs_take_over_host(void)
+ {
+@@ -632,6 +695,9 @@ sweet_ufs_init(void)
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	error = ufs_take_over_host();
++	if (!error) {
++		error = ufs_link_init();
++	}
+ 	if (!error) {
+ 		static const uint8_t tur[6] = { 0x00 };
+ 		/* The first command after the bootloader may report a unit attention. */
