@@ -379,6 +379,10 @@ void shim_main(uint64_t dtb)
 	struct mmu_info mi;
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
+		/* peridot phase-1: magenta marker = shim actually entered; 5 s on screen. */
+	con_clear(MAGENTA);
+	con_str("PHASE-1", "shim entered, detail in 5 s");
+	delay_ms(5000);
 	stage = "loader";
 	con_clear(RED);
 	con_str("SHIM", "sweet milestone 4: xnu loader");
@@ -391,10 +395,9 @@ void shim_main(uint64_t dtb)
 	stage = "ufs";
 	test_ufs();
 	con_skip();
-	/* Keep the probe results on screen (later tests clear it); reset after 3 min. */
-	con_str("UFS", "probe done, reset in ~3 min");
-	delay_ms(180000);
-	reset(20);
+	/* peridot: do NOT reset here; run the rest of the flow (MMU/PSCI/GIC/DONE). */
+	con_str("UFS", "probe done, continuing");
+	delay_ms(3000);
 
 	stage = "fill off";
 	uint64_t fill_off = ticks_fill(RED);
@@ -435,5 +438,7 @@ void shim_main(uint64_t dtb)
 	test_gic();
 
 	stage = "done";
+	con_str("DONE", "staying 3 min for photo");
+	delay_ms(180000);
 	reset(40);
 }

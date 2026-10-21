@@ -23,6 +23,8 @@ MEM_SIZE = 0x31000000
 # 0x08b0000000+0x7f00000, 0x08b8100000+0x1e00000, 0x08c0000000+0xc0000000).
 HIGH_PHYS_BASE = 0x08c0000000
 HIGH_MEM_SIZE = 0x0c0000000
+# /arm-io children are relative to this; it must not be 0 (serial_init bails)
+SOC_BASE = 0x01000000
 
 GICD, GICD_SIZE = 0x17100000, 0x10000
 GICR, GICR_SIZE = 0x17180000, 0x200000
@@ -224,7 +226,7 @@ def build(seed=None, qemu=False, highmem=False):
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm8635') + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),

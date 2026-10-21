@@ -88,13 +88,25 @@ sweet repo with peridot constants in place.
   boot args: keep cpus=1 for the very first attempt.
 
 **Concrete next actions (2026-10-21):**
-1. Commit the current constants (mkadt/shim/patches/NOTES).
-2. Ask the user for the D22AP artifact/permission to download the 16.7.16 IPSW
-   (iPhone10,3); with it, produce the first peridot ADT via tools/mkadt.py +
-   shim/out payload build script.
-3. First phone test: shim-only blue-screen `fastboot boot` (no XNU, no ADT needed if we
-   boot the shim with a stub payload; otherwise build ADT after step 2). Expect FB colors
-   at 1220x2712, zero GPU involvement, no timer math yet (19.2 MHz verified off FDT).
+1. ~~Commit the current constants~~ (d8a73c0).
+2. ~~Ask for D22AP artifact~~ (DeviceTree.d22ap.im4p 20H392 fetched via remotezip; lzfse from
+   source compiled to /usr/local/bin/lzfse; decoded to research/ipsw-x/d22ap.adt).
+3. ~~shim build~~: build.sh adapted for clang --target=aarch64-none-elf + lld (no cross-gcc
+   here); CFLAGS -fno-jump-tables (clang otherwise emits .rodata ABS64 pointers -> build.sh
+   guards); strcmp helper in ufs.c (gcc lowered it, clang imports it).
+4. **PHASE-1 BOOT PASS (2026-10-21 ~11:56 + ~12:03, images out/shim-boot.img
+   sha 74f52af8 & 69d9cb26): `fastboot boot` -> observed on panel: magenta 5 s marker ->
+   red + SHIM/LOADER text -> UFS probe lines -> MMU/PAR rows -> PSCI ver/smccc ->
+   GIC/VTIMER/PTIMER/SGI windows -> DONE-hold 3 min -> reset to Android.** No PANIC.
+   Observations: (a) FB writes at 0xe3940000 with 1220x2712/stride 4880 render fine
+   (console layout matches per panel), (b) reset(20) after the UFS probe was removed so
+   the flow continues through MMU/PSCI/GIC/DONE, (c) USB goes silent during the shim run
+   as designed (no USB stack in phase 1); Android comes back after reset(40).
+5. Next-realistic: phase-2 kernel boot — build xnu/patches 0001-0012 peridot (gh Actions),
+   mkpayload with peridot.adt + ramdisk, try `fastboot boot`. Boot-args start at
+   cpus=1 debug=0xc serial=3 keepsyms=1 (per sweet's pattern). Expect early-FB band +0xe3940000
+   console markers 'arm64_start'/'start_first_cpu' markers; if the band positions look off,
+   revisit 0010 MOV64 (2680*4880 row math), we calculated from panel 2712 rows.
 
 ## Below: ORIGINAL sweet handoff history (frozen, reference only)
 

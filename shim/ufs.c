@@ -13,6 +13,12 @@
 #include "console.h"
 #include "ufs.h"
 
+
+static int strcmp(const char *a, const char *b)
+{
+	while (*a && *a == *b) { a++; b++; }
+	return (unsigned char)*a - (unsigned char)*b;
+}
 #define UFS_BASE	0x01d84000UL	/* ufshc@1d84000, sweet live FDT */
 
 #define REG_CAP		0x00
@@ -186,8 +192,8 @@ static void list_partitions(uint32_t entry_lba, uint32_t nent)
 		if (((last - first + 1) >> 8) < 64)	/* keep the screen to the big ones */
 			continue;
 		con_hex2(name, "lba=", (uint32_t)first, "MiB=", (uint32_t)((last - first + 1) >> 8));
-		if (!__builtin_strcmp(name, "userdata") || !__builtin_strcmp(name, "cust") ||
-		    !__builtin_strcmp(name, "cache"))
+		if (!strcmp(name, "userdata") || !strcmp(name, "cust") ||
+		    !strcmp(name, "cache"))
 			con_str(" fs", fs_type((uint32_t)first));
 	}
 }
@@ -264,3 +270,4 @@ void test_ufs(void)
 		return;
 	list_partitions(elba, nent);
 }
+
