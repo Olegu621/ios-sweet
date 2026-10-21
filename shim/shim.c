@@ -395,7 +395,15 @@ void shim_main(uint64_t dtb)
 	 * on screen forever for reading; on success it jumps to xnu inside
 	 * loader_boot and never reaches this. */
 	if ((uintptr_t)why != 0) {
-		con_str("HOLD", "libre reading: this report stays");
+		stage = "ufs";
+		con_clear(RED);
+		con_str("SHIM", "sweet milestone 4 + UFS diag");
+		con_skip();
+		test_ufs();
+		con_skip();
+		con_str("UFS", "probe done, staying 15 s");
+		delay_ms(15000);
+		con_str("HOLD", "report stays for photo");
 		for (;;)
 			delay_ms(1000);
 	}

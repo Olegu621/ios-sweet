@@ -85,6 +85,15 @@ static uint32_t be32(const uint8_t *p)
 	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
+/* Response UPIU: 12-byte header, then sense data (the data segment length is
+ * resp[8..11] big-endian; sense follows from resp[12]). */
+static void sense_dump(void)
+{
+	con_hex2("SENSE", "len=", be32(ucd.resp + 8), "d0_3=", be32(ucd.resp + 12));
+	con_hex2("SENSE", "4_7=", be32(ucd.resp + 16), "8_b=", be32(ucd.resp + 20));
+	con_hex2("SENSE", "c_f=", be32(ucd.resp + 24), "10_3=", be32(ucd.resp + 28));
+}
+
 /*
  * Issue one SCSI command (read direction or no data) in slot 0.
  * Returns 0 on success, otherwise a code describing the failure stage.
@@ -134,11 +143,19 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	__asm__ volatile("dsb sy" ::: "memory");
 	*ocs_out = utrl[0].dw2 & 0xff;
 	*status_out = ucd.resp[7];		/* SCSI status in the response UPIU */
-	if (*ocs_out)
+	if (*ocs_out) {
+		sense_dump();
 		return 2;
-	if (ucd.resp[0] != 0x21)		/* RESPONSE UPIU */
+	}
+	if (ucd.resp[0] != 0x21) {		/* RESPONSE UPIU */
+		sense_dump();
 		return 3;
-	return *status_out ? 4 : 0;
+	}
+	if (*status_out) {
+		sense_dump();
+		return 4;
+	}
+	return 0;
 }
 
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
