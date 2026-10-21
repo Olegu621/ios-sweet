@@ -1,0 +1,20 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 6b926fe..ce32930 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -251,6 +251,15 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+ 		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
++		printf("SWEET UFS: upiu %02x %02x %02x %02x %02x %02x %02x %02x sense %02x %02x %02x %02x %02x %02x %02x %02x\n",
++		    ucd->resp[0], ucd->resp[1], ucd->resp[2], ucd->resp[3],
++		    ucd->resp[4], ucd->resp[5], ucd->resp[6], ucd->resp[7],
++		    ucd->resp[8], ucd->resp[9], ucd->resp[10], ucd->resp[11],
++		    ucd->resp[12], ucd->resp[13], ucd->resp[14], ucd->resp[15]);
++		printf("SWEET UFS: cdb %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x utrd %08x %08x %08x\n",
++		    ucd->cmd[16], ucd->cmd[17], ucd->cmd[18], ucd->cmd[19],
++		    ucd->cmd[20], ucd->cmd[21], ucd->cmd[22], ucd->cmd[23],
++		    ucd->cmd[24], ucd->cmd[25], utrd->dw0, utrd->dw1, utrd->dw2);
+ 		return EIO;
+ 	}
+ 	return 0;
