@@ -204,6 +204,43 @@ sweet repo with peridot constants in place.
       physmap_va+row map PA 0xe2000000+row (13MB below fb — INVISIBLE writes, no fault, but
       likely wrong address); fix AFTER seeing how far boot goes with 0084.
 
+12. **🎉 PHASE-2 PASS: console survives TTBR1 handoff; kernel boots to the bsd root wait
+    (2026-10-21 evening, kernel-0044peridot per 0085 + payload-0045p).**
+    - 0085-peridot-final-console-two-blocks.patch (commit ba95550, CI 39642231295):
+      arm_vm_init.c sweet_early_map_final maps BOTH 32MB fb blocks (slots 0xe2000000|flags
+      and 0xe4000000|flags, each slot with an assert on the EMPTY state) and relocates the console alias by
+      +0x3940000 (SWEET_EARLY_FB_VA + (0xe3940000-0xe2000000)). Boot 0045p
+      (shim-boot-0045p.img, sha 1760ba2add36bb8a) shows marks 9..17 (kernel framebuffer VA
+      live; TTBR0 off; TLB flushed; physmap rebound; pmap_bootstrap; early I/O page tables
+      ready; "calling serial_init"; "fbcon config read; mapping") and the AppLE-known
+      panic "pmap_map_bd_with_options: no PTE for vaddr=..., virt=..., start=..., end=...,
+      prot=0x3, options=0x1" (WCOMB fb map).
+    - ROOT CAUSE: ADT sweet-fbcon reg size was a sweet-copied 0x2b00000 (43.8MB); but the
+      kernel prebuilds io PTEs at arm_vm_init (loop "2 + mem_segments*10 MB + fb bytes",
+      mem_segments formed from boot-args mem_size=192MB -> ~25MB) — 43MB > 25MB, so the
+      try map pmap_pte reached an unprebuilt VA. FIX (tools/mkadt.py): FB reg size =
+      2712*4880 = 0x00c9f180 (13.2MB, the real panel fb). Payload 0045p rebuilt with same
+      kernel (SHIM sha 1760ba2...) and boots THROUGH the fbcon map: full XNU kprintf
+      console output appears on the panel (AMFI/HFS SWEET lines) and the kernel WALTS at
+      `Waiting on <dict><key>IOPProviderClass</key><string>IOMedia</string>...` =
+      bsd_init waiting for a ROOT DISK. This is the ASSIGNMENT for phase-3.
+13. PHASE-3 prep done while console stable (all on the phone-visible build 0045p
+    already): research/ipsw-x/ has the full 16.7.16 iPhone10,3 IPSW (6.17GB) + dmgs:
+    OS rootfs = 087-86698-044.dmg (4.73GB), SystemOS cryptex = 087-86593-047.dmg (2.74GB),
+    AppOS = 087-86715-047.dmg (10MB, extracted today from the ipsw zip via python),
+    d22ap.adt already in tree. Host build stack: lzfse built+installed (liblzfse.so +
+    headers to /usr/local), apfs-fuse built+installed from sgan81/apfs-fuse at /usr/local/bin
+    (cmake 4.4.4 policy-hack -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DX_CXX_FLAGS "-include cstdint",
+    fuse3 3.18.3 ok), fsck.hfsplus symlink -> /usr/local/bin/fsck_hfs (hfsprogs binaries
+    already on the host). mkiosroot.sh run started in bg (gated on BUILD run);
+    log /tmp/opencode/mkiosroot-run.log, image target =
+    research/ipsw-x/ios16-root-20H392-peridot-v1.img (+ .simg) 16G.
+    Next after the image: mkadt --highmem (0x8c0000000+3GB) ADT, full sweet boot args
+    (rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin
+    ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=30 — console stays
+    visible for the first userland boot; sweetfb_noconsole=1 later when the GUI comes
+    up), payload-0047p + shim-boot-0047p, then flash userdata (USER CONFIRM) + boot.
+
 ## Below: ORIGINAL sweet handoff history (frozen, reference only)
 
 ## Agent handoff / active work (2026-10-15, latest)
