@@ -84,6 +84,10 @@ static int strcmp(const char *a, const char *b)
 
 #define BLOCK		4096u
 
+/* The last 4 KiB block of the "cache" partition (sda29, 128 MiB at LBA
+ * 176128): a scratch area the recovery can read back with dd. */
+#define LOG_LBA		208895u
+
 /* ---- experiment log (kept in RAM, written to the UFS at the end) ---- */
 static char logbuf[16384];
 static unsigned loglen;
@@ -546,16 +550,51 @@ static void fdeviceinit_handshake(void)
  * Steps 1..n are tried one after another, each one followed by a TUR, so a
  * single boot can find out which one the device needs.
  */
+
+/*
+ * Write the log into the last blocks of the cache partition.  The device
+ * only accepts the write while it is in the state it accepts commands in,
+ * so this is called after every step that may change that state.
+ */
+static void write_log(void)
+{
+	uint8_t *blk = data;
+	uint32_t ocs = 0, st = 0, wrc;
+	unsigned n = loglen < 4 * BLOCK - 1 ? loglen : 4 * BLOCK - 1;
+
+	for (unsigned i = 0; i < 4 * BLOCK; i++)
+		blk[i] = 0;
+	for (unsigned i = 0; i < n; i++)
+		blk[i] = logbuf[i];
+	wrc = write_blocks(LOG_LBA, blk, 4);
+	log_num("log_write_rc", wrc);
+	con_hex2("UFS LOG", "lba=", LOG_LBA, "rc=", wrc);
+}
+
+/*
+ * A TEST UNIT READY, retried: after a device reset the first command comes
+ * back with a unit attention ("power on, reset or bus device reset
+ * occurred", ASC 0x29) and only the retry gets through - the recovery
+ * driver does the same.
+ */
 static uint32_t try_tur(const char *what)
 {
 	static const uint8_t tur[6] = { 0x00 };
-	uint32_t ocs = 0, st = 0;
-	uint32_t rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+	uint32_t ocs = 0, st = 0, rc = 0xffffffff;
 
 	log_str(what);
 	log_str(":");
-	log_num("  tur_rc", rc);
-	log_num("  ocs_st", (ocs << 8) | st);
+	for (int i = 0; i < 5; i++) {
+		rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+		log_num("  tur_rc", rc);
+		log_num("  ocs_st", (ocs << 8) | st);
+		log_num("  sense_key", be32(ucd.resp + 35) & 0xff);
+		log_num("  sense_asc", be32(ucd.resp + 36) & 0xff);
+		log_num("  sense_c8", be32(ucd.resp + 42));
+		if (!rc)
+			break;
+	}
+	write_log();
 	return rc;
 }
 
@@ -601,12 +640,18 @@ static void ufs_power_mode_experiment(void)
 	log_num("pwrmode_before", v);
 
 	/*
-	 * The reference driver order: NOP OUT, the fDeviceInit handshake,
-	 * the descriptors, the power mode change - and only then the first
-	 * SCSI command.  The first TUR is kept for the record but comes
+	 * The reference driver order: a device reset, a link startup, NOP OUT,
+	 * the fDeviceInit handshake, the descriptors, the power mode change -
+	 * and only then the first SCSI command (which after the reset comes
+	 * back with a unit attention and has to be retried).  The first TUR is kept for the record but comes
 	 * after the init sequence, because a refused command may leave the
 	 * device in a state where it refuses everything.
 	 */
+	/* C0: the full reference sequence, starting with a device reset. */
+	uic(UIC_DME_RESET, 0, 0, 0);
+	uic(UIC_DME_ENABLE, 0, 0, 0);
+	uic(UIC_DME_LINK_STARTUP, 0, 0, 0);
+	take_over_utrl();
 	nop_out();
 	fdeviceinit_handshake();
 	read_descriptor(0x00, 0x40);		/* the device descriptor */
@@ -716,10 +761,6 @@ static const char *fs_type(uint32_t lba)
 }
 
 static uint32_t cache_first, cache_last;	/* the scratch ext4 partition we log into */
-
-/* The last 4 KiB block of the "cache" partition (sda29, 128 MiB at LBA
- * 176128): a scratch area the recovery can read back with dd. */
-#define LOG_LBA		208895u
 
 /* One line per GPT entry of at least 64 MiB: name, first LBA, size in MiB (4K blocks). */
 static void list_partitions(uint32_t entry_lba, uint32_t nent)
@@ -834,24 +875,8 @@ void test_ufs(void)
 	list_partitions(elba, nent);
 log_it:
 
-	/*
-	 * Publish the log into the scratch "cache" partition so that it can be
-	 * read back from the recovery (the phone resets into the recovery with
-	 * the boot reason it was started with).
-	 */
-	if (1) {
-		uint8_t *blk = data;
-		uint32_t ocs = 0, st = 0, wrc;
-		unsigned n = loglen < 4 * BLOCK - 1 ? loglen : 4 * BLOCK - 1;
-
-		for (unsigned i = 0; i < 4 * BLOCK; i++)
-			blk[i] = 0;
-		for (unsigned i = 0; i < n; i++)
-			blk[i] = logbuf[i];
-		wrc = write_blocks(LOG_LBA, blk, 4);
-		con_hex2("UFS LOG", "lba=", LOG_LBA, "rc=", wrc);
-		log_num("log_write_rc", wrc);
-	}
+	/* Publish the log into the scratch "cache" partition. */
+	write_log();
 	con_str("UFS", "log written to cache partition");
 }
 
