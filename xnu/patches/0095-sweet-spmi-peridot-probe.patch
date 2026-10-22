@@ -1,12 +1,11 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 6630131..d9bd856 100644
+index 6630131..6b72bec 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -110,6 +110,8 @@ bsd/dev/sweet_keys.c			standard
+@@ -110,6 +110,7 @@ bsd/dev/sweet_keys.c			standard
  bsd/dev/sweet_touch.c			standard
  bsd/dev/sweet_rpmh.c			standard
  bsd/dev/sweet_spmi.c			standard
-+bsd/dev/sweet_spmi_peridot.c		standard
 +bsd/dev/sweet_spmi_peridot.c		standard
  bsd/dev/sweet_usb.c			standard
  bsd/dev/mem.c				standard
