@@ -1,18 +1,19 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 6630131..6b72bec 100644
+index 6630131..d9bd856 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -110,6 +110,7 @@ bsd/dev/sweet_keys.c			standard
+@@ -110,6 +110,8 @@ bsd/dev/sweet_keys.c			standard
  bsd/dev/sweet_touch.c			standard
  bsd/dev/sweet_rpmh.c			standard
  bsd/dev/sweet_spmi.c			standard
++bsd/dev/sweet_spmi_peridot.c		standard
 +bsd/dev/sweet_spmi_peridot.c		standard
  bsd/dev/sweet_usb.c			standard
  bsd/dev/mem.c				standard
  bsd/dev/munge.c 			optional config_requires_u32_munging
 diff --git a/bsd/dev/sweet_spmi_peridot.c b/bsd/dev/sweet_spmi_peridot.c
 new file mode 100644
-index 0000000..74f98f1
+index 0000000..134fa27
 --- /dev/null
 +++ b/bsd/dev/sweet_spmi_peridot.c
 @@ -0,0 +1,150 @@
@@ -70,7 +71,7 @@ index 0000000..74f98f1
 +}
 +
 +int
-+sweet_spmi_init(void)
++sweet_spmi_p_init(void)
 +{
 +	if (sp_attempted) {
 +		return sp_ready ? 0 : -1;
@@ -102,7 +103,7 @@ index 0000000..74f98f1
 +}
 +
 +int
-+sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
++sweet_spmi_p_read(unsigned sid, unsigned addr, uint8_t *out)
 +{
 +	/* Read only, any PMIC block: the power/resin and key blocks are needed
 +	 * as well, and a read can not damage the PMIC. */
@@ -152,15 +153,15 @@ index 0000000..74f98f1
 +	int r1, r2, r3;
 +	uint8_t hlos = 0, rt = 0, vol = 0;
 +
-+	if (sweet_spmi_init() != 0) {
-+		printf("SWEET SPMI: init failed\n");
++	if (sweet_spmi_p_init() != 0) {
++		printf("SWEET SPMI: peridot init failed\n");
 +		return;
 +	}
-+	r1 = sweet_spmi_read(0, 0x1300, &v);
++	r1 = sweet_spmi_p_read(0, 0x1300, &v);
 +	hlos = v;
-+	r2 = sweet_spmi_read(0, 0x1310, &v);
++	r2 = sweet_spmi_p_read(0, 0x1310, &v);
 +	rt = v;
-+	r3 = sweet_spmi_read(1, 0x8d10, &v);
++	r3 = sweet_spmi_p_read(1, 0x8d10, &v);
 +	vol = v;
 +	printf("SWEET SPMI: pmk8550 pon_hlos %02x (r%d) rt %02x (r%d), pmxr2230 rt %02x (r%d)\n",
 +	    hlos, r1, rt, r2, vol, r3);
