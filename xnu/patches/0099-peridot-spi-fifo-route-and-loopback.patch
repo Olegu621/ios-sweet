@@ -1,0 +1,50 @@
+--- a/bsd/dev/sweet_spi_peridot.c
++++ b/bsd/dev/sweet_spi_peridot.c
+@@ -172,6 +172,10 @@
+ 	if (!ok) {
+ 		printf("PERIDOT SPI: transfer len=%u tx=%u rx=%u IRQ=%#x status=%#x\n",
+ 		    n, tx, rx, tp_rd(tp_se, 0x610), tp_rd(tp_se, 0x40));
++		printf("PERIDOT SPI: failed-state TXFIFO=%#x RXFIFO=%#x MCLK=%#x CLKSEL=%#x DMA=%#x IRQEN=%#x GSI=%#x MCMD=%#x SIRQ=%#x\n",
++		    tp_rd(tp_se, 0x800), tp_rd(tp_se, 0x804), tp_rd(tp_se, 0x48),
++		    tp_rd(tp_se, 0x7c), tp_rd(tp_se, 0x258), tp_rd(tp_se, 0xe1c),
++		    tp_rd(tp_se, 0xe18), tp_rd(tp_se, 0x600), tp_rd(tp_se, 0x640));
+ 		tp_abort();
+ 	}
+ 	bool released = tp_command(9);
+@@ -253,10 +257,11 @@
+ 	tp_wr(tp_se, 0x24, 0x7f);
+ 	tp_wr(tp_se, 0x20, 1);
+ 	tp_wr(tp_se, 0xe18, 0); /* GSI events off */
+-	tp_wr(tp_se, 0xe1c, 0); /* polling, no external IRQ request */
++	tp_wr(tp_se, 0xe1c, 0x0f); /* FIFO/CPU route, as geni_se_io_set_mode.
++	 * The GIC line remains unrequested/masked; completion is polled. */
+ 	tp_wr(tp_se, 0x258, 0); /* DMA mode off */
+ 	tp_wr(tp_se, 0x614, 0xffffffffu);
+-	tp_wr(tp_se, 0x644, 0);
++	tp_wr(tp_se, 0x644, 0x03c0003f); /* S common errors + CMD_DONE */
+ 	tp_wr(tp_se, 0x618, 0xffffffffu);
+ 	tp_wr(tp_se, 0x648, 0xffffffffu);
+ 	tp_wr(tp_se, 0x80c, 1);
+@@ -292,6 +297,22 @@
+ 	while (stale--) {
+ 		(void)tp_rd(tp_se, 0x780);
+ 	}
++	/* Isolate host FIFO transport from Goodix power/reset. The transmitted
++	 * bytes form a read-only Goodix read even if they reach the real pins. */
++	memset(tp_tx, 0xff, 69);
++	tp_tx[0] = 0xf1;
++	tp_tx[1] = 0;
++	tp_tx[2] = 1;
++	tp_tx[3] = 0;
++	tp_tx[4] = 0x14;
++	tp_wr(tp_se, 0x22c, 1);
++	bool loop_ok = tp_transfer(69) && memcmp(tp_tx, tp_rx, 69) == 0;
++	tp_wr(tp_se, 0x22c, 0);
++	printf("PERIDOT SPI: FIFO loopback69 %s first=%02x %02x %02x %02x\n",
++	    loop_ok ? "PASS" : "FAIL", tp_rx[0], tp_rx[1], tp_rx[2], tp_rx[3]);
++	if (!loop_ok) {
++		return;
++	}
+ 	uint8_t version[28];
+ 	if (!tp_read(0x10014, version, sizeof(version))) {
+ 		printf("PERIDOT SPI: Goodix version read failed\n");

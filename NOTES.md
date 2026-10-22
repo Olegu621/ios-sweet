@@ -4,10 +4,11 @@
 
 ## Active handoff (peridot, 2026-10-22, Codex continuation)
 
-**Latest continuation (Codex, after OpenCode): phone is in root recovery.
+**Latest continuation (Codex, after OpenCode): phone is in root recovery after0098 timed boot.
 SPMI/key patch 0097 passed its first hardware test: all three buttons
 produce matched down/up events delivered to a live HID client. Native
-Goodix SPI read-only probe 0098 is being prepared.
+Goodix SPI0098 failed its first data transfer without panic;0099 corrects
+the FIFO event route and adds loopback to isolate host from sensor state.
 This paragraph and the next section override stale device/status claims below.**
 
 ### Corrected touchscreen facts (Codex, confirmed in live recovery)
@@ -111,12 +112,42 @@ sensor. The recovery's real Goodix driver registers that input device.
   stable0092 image remains available; never use old shim diagnostic writers.
 
 
-### Prepared follow-up (0099 candidate, NOT YET committed or booted)
+### 0098 hardware result and 0099 FIFO isolation
+
+- CI0098 **39761394868 succeeded**, commit8940f93. Verified SHA256SUMS:
+  kernel5125959ca2685e80cd575afba06075afaa8ce450c07ce72fed51078630b63ff8.
+  Extracted CI tree matches exactly SPI source, UFS, conf/files and HID base.
+- cycle-0098-spi:45-second timed reset, automatic recovery return succeeded,
+  no panic. GCC vote4c7c0200, DFS21, CFG0=1, CBCR4000 (clock on).
+  SPI FW102 (protocol1), idle status0; HW0=201029e4/HW1=20104800:
+  width32/depth16; IF=1. Reset GPIO128 and IRQ129 both ctrl1/input0.
+- CS assert/deassert complete. Data command3 queues36 bytes, RX0,
+  IRQ40000000/status41, then bounded abort. Version read failed. This is
+  NOT a successful Goodix transport and NOT proof that FIFO cannot work.
+- Actual peridot-u-oss spi-geni-qcom.c and qcom-geni-se.c downloaded to
+  linux-ref/peridot-*.c. Vendor confirms fallback FIFO, command1|2=3;
+  CS_TOGGLE BIT1 differs from mainline BIT0 (keep correct vendor BIT1).
+- Found our mode mismatch:0098 wrote SE_IRQ_EN=e1c to0, but native FIFO
+  initialization enables internal CPU route bits0..3 (0xf).0099 does this
+  and S common error/CMD_DONE enable; GIC line is still masked/unrequested.
+  Adds69-byte SPI loopback with only a harmless F1 read on transmitted pins,
+  restores normal mode, then probes version only if loopback passes. Adds
+  bounded failure register dump. No reset, supply or chip writes yet.
+- Local single-file compile and ASan/UBSan actual FIFO harness passed after
+  this change. Next CI0099, temporary45-second timed test, inspect loopback
+  BEFORE blaming sensor rails. Sensor reset is currently low/input; supply
+  may also need initialization, but that cannot explain a failed host loop.
+- Recovery regulator reference saved: spi1.0 avdd=PMXR2230 L13B3300mV,
+  iovdd=L23B1800mV. DO NOT reuse old sweet RPMh addresses or voltages.
+- User has left home: continue autonomously, ask no questions, no physical
+  interaction available. Record physical touch/UI tests as pending.
+
+### Prepared follow-up (touch candidate (deferred, to rebase after FIFO fix), NOT YET committed or booted)
 
 - research/diagnostics-20261022/0099-peridot-goodix-touch-candidate.patch;
-  source edits are in the ignored local buildtree. Base SPI source saved as
-  spi.pre0099.c; HID base SweetHID.pre0099.cpp. Do not confuse candidate
-  edits with what CI0098 is building. Wait for0098's hardware result first.
+  source edits are in the ignored local buildtree. Full SPI touch candidate saved as spi.touch-candidate.c; old
+  base SPI source spi.pre0099.c; HID base SweetHID.pre0099.cpp. Do not confuse candidate
+  edits with CI0098/0099 source. HID geometry edits remain in buildtree. Rebase candidate after host FIFO transport is proven.
 - Explicit peridotspi=2: fixed8-byte headers/points, checksummed0..10-contact
   frames, validated event addr10308, IRQ129 polling8ms; only write is F0
   zero-byte event-status ACK. No reset, firmware/config upload, DMA or IRQs.
