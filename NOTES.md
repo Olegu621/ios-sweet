@@ -21,7 +21,7 @@
   Local C syntax checks passed for sweet_ufs.c and sweet_early.c with latest CI
   headers. A host harness using the actual writer passes Linux-format decode,
   non-power-of-two wrap, bounds and nested-writer checks (ASan/UBSan).
-  Hardware survival across reboot is still UNTESTED. Pull via
+  Hardware survival across reboot is being tested with the safe shim. Pull via
   `tools/peridot-pstore-pull.sh research/diagnostics-20261022/pstore-N`.
 - 0090 also fixes QUERY READ_DESC being sent as a standard WRITE query (0x81);
   READ_DESC/READ_ATTR/READ_FLAG must use standard READ (0x01). The old shim log
@@ -32,7 +32,7 @@
   frame. The original panic itself was not saved: stack overflow remains a
   hypothesis for THAT boot, not a confirmed diagnosis of the latest kernel.
 
-### Confirmed super corruption from the OLD diagnostic shim (repair pending approval)
+### Confirmed super corruption from the OLD diagnostic shim (REPAIRED)
 
 - The OLD shim's LOG_LBA=208895 is the LAST 4 KiB block of **rescue**, not cache.
   Its 4-block WRITE spills three blocks into the start of **super**. Live sysfs:
@@ -50,8 +50,11 @@
   AOSP SHA-256 checksum. SHA256:
   `9dca626a8cd8145d128a1802fbfbf568dddcea7ad26fa4e23edb096e804f9849`.
   Applying it to an offline copy makes host lpdump parse all three slots.
-  **No repair has been written to the phone yet. User approval requested.**
-- Shim source is being fixed to remove ALL SCSI WRITE support and retain its
+  **User approved repair ("чо хочешь делай мне похуй"). Wrote exactly 8192 bytes
+  at super +0x1000, synced, and reread the first 4 MiB. Exact byte-for-byte
+  match with the offline candidate; offsets below 0x1000 and from 0x3000 onward
+  unchanged. Host lpdump reads all 3 slots from actual device readback.**
+- Commit **ede6eb3** fixes the shim source to remove ALL SCSI WRITE support and retain its
   diagnostic log in the same ramoops RAM instead. `shim-diag-ramoops.img` is the
   safe replacement; DO NOT boot older diagnostic images (including the loader
   fallback in older payload images) because they contain the bad disk writer.
@@ -60,10 +63,10 @@
 
 1. Finish CI 39725536321 and build a new payload using the NEW shim source and
    newly generated peridot ADT (old peridot-high.adt lacks ramoops).
-2. If geometry repair is approved: push the 8192-byte candidate into /tmp in
-   recovery, write to `super` with bs=4096 seek=1 count=2 conv=notrunc, sync,
-   reread the first 4 MiB and require exact equality with the offline candidate
-   (except untouched reserved first block). Preserve all six metadata records.
+2. Geometry repair DONE and readback verified. BCB command was temporarily set
+   to `boot-recovery` (32 bytes, backup saved) so the safe shim PSCI reset should
+   return to recovery automatically. Safe shim boot accepted by fastboot.
+   Read pstore when it returns; verify super metadata stays unchanged.
 3. Boot 0090 temporarily, collect first panic via recovery pstore. For a baseline
    that avoids unported SM7150 peripherals use `sweetkeys=0 sweettouch=0 sweetusb=0`.
    These drivers still contain SWEET MMIO constants incompatible with SM8635;
