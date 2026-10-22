@@ -401,11 +401,14 @@ void shim_main(uint64_t dtb)
 		con_skip();
 		test_ufs();
 		con_skip();
-		con_str("UFS", "probe done, staying 15 s");
-		delay_ms(15000);
-		con_str("HOLD", "report stays for photo");
-		for (;;)
-			delay_ms(1000);
+		ufs_print_log();
+		con_skip();
+		con_str("UFS", "probe done, resetting in 10 s");
+		delay_ms(10000);
+		/* Back to the recovery: the phone was started with the "recovery"
+		 * boot reason, so a plain PSCI reset lands there again and the
+		 * log we wrote into the UFS can be read back over adb. */
+		reset(0);
 	}
 
 	/* No payload: probe the internal UFS while the MMU is still off. */

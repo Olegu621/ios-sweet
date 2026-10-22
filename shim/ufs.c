@@ -22,21 +22,96 @@ static int strcmp(const char *a, const char *b)
 #define UFS_BASE	0x01d84000UL	/* ufshc@1d84000, sweet live FDT */
 
 #define REG_CAP		0x00
+#define REG_MCQCAP	0x04
 #define REG_VER		0x08
+#define REG_EXTCAP	0x0c
+#define REG_PID		0x10
+#define REG_MID		0x14
 #define REG_IS		0x20
+#define REG_IE		0x24
 #define REG_HCS		0x30
 #define REG_HCE		0x34
+#define REG_UECPA	0x38
+#define REG_UECDL	0x3c
+#define REG_UECN	0x40
+#define REG_UECT	0x44
+#define REG_UECDME	0x48
 #define REG_UTRLBA	0x50
 #define REG_UTRLBAU	0x54
 #define REG_UTRLDBR	0x58
 #define REG_UTRLCLR	0x5c
 #define REG_UTRLRSR	0x60
+/* UFSHCI 2.x/3.x/4.x: the UIC command block moved to 0x90 (in 1.x it was
+ * 0x10, which is CONTROLLER_PID in this layout and read-only). */
+#define REG_UICCMD	0x90
+#define REG_UICARG0	0x94
+#define REG_UICARG1	0x98
+#define REG_UICARG2	0x9c
+
+#define IS_UIC_COMP	(1u << 10)	/* UIC command completion */
 
 #define HCS_DP		(1u << 0)
 #define HCS_UTRLRDY	(1u << 1)
 #define HCS_UCRDY	(1u << 3)
 
+/* UIC DME commands (JEDEC UFS 4.0, table "UIC commands"). */
+#define UIC_DME_GET		0x01
+#define UIC_DME_SET		0x02
+#define UIC_DME_PEER_GET	0x03
+#define UIC_DME_POWERON		0x10
+#define UIC_DME_POWEROFF	0x11
+#define UIC_DME_ENABLE		0x12
+#define UIC_DME_RESET		0x14
+#define UIC_DME_LINK_STARTUP	0x16
+
+/* PA layer MIB attributes (UniPro 1.8 / JESD220). */
+#define PA_ACTIVETXDATALANES	0x1560
+#define PA_CONNECTEDTXDATALANES	0x1561
+#define PA_TXPWRSTATUS		0x1567
+#define PA_TXGEAR		0x1568
+#define PA_TXTERMINATION	0x1569
+#define PA_HSSERIES		0x156a
+#define PA_PWRMODE		0x1571
+#define PA_ACTIVERXDATALANES	0x1580
+#define PA_CONNECTEDRXDATALANES	0x1581
+#define PA_RXPWRSTATUS		0x1582
+#define PA_RXGEAR		0x1583
+#define PA_RXTERMINATION	0x1584
+#define PA_MAXRXPWMGEAR		0x1586
+#define PA_MAXRXHSGEAR		0x1587
+#define PWRMODE_FAST		0x11	/* (rx<<4)|tx, FAST = 1 */
+#define PA_HS_MODE_B		2
+
 #define BLOCK		4096u
+
+/* ---- experiment log (kept in RAM, written to the UFS at the end) ---- */
+static char logbuf[4096];
+static unsigned loglen;
+
+static void log_str(const char *t)
+{
+	while (*t && loglen < sizeof(logbuf) - 2)
+		logbuf[loglen++] = *t++;
+	logbuf[loglen] = 0;
+}
+
+static void log_num(const char *tag, uint32_t v)
+{
+	char t[12];
+	int k = 0;
+
+	log_str(tag);
+	log_str("=");
+	if (!v)
+		t[k++] = '0';
+	while (v) {
+		t[k++] = "0123456789abcdef"[v & 15];
+		v >>= 4;
+	}
+	while (k)
+		logbuf[loglen++] = t[--k];
+	log_str("\n");
+}
 
 static inline uint32_t ufs_rd(uint32_t off) { return *(volatile uint32_t *)(UFS_BASE + off); }
 static inline void ufs_wr(uint32_t off, uint32_t v) { *(volatile uint32_t *)(UFS_BASE + off) = v; }
@@ -85,13 +160,20 @@ static uint32_t be32(const uint8_t *p)
 	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
-/* Response UPIU: 12-byte header, then sense data (the data segment length is
- * resp[8..11] big-endian; sense follows from resp[12]). */
+static uint32_t be16(const uint8_t *p)
+{
+	return (uint32_t)p[0] << 8 | p[1];
+}
+
+/* Response UPIU: 12-byte header, then the SCSI part. The sense data length
+ * is at offset 32 and the 18 sense bytes follow (Linux struct utp_cmd_rsp). */
 static void sense_dump(void)
 {
-	con_hex2("SENSE", "len=", be32(ucd.resp + 8), "d0_3=", be32(ucd.resp + 12));
-	con_hex2("SENSE", "4_7=", be32(ucd.resp + 16), "8_b=", be32(ucd.resp + 20));
-	con_hex2("SENSE", "c_f=", be32(ucd.resp + 24), "10_3=", be32(ucd.resp + 28));
+	con_hex2("RSP", "d0_3=", be32(ucd.resp), "d4_7=", be32(ucd.resp + 4));
+	con_hex2("RSP", "d8_b=", be32(ucd.resp + 8), "len=", be16(ucd.resp + 32));
+	con_hex2("SENSE", "d0_3=", be32(ucd.resp + 34), "d4_7=", be32(ucd.resp + 38));
+	con_hex2("SENSE", "d8_b=", be32(ucd.resp + 42), "dc_f=", be32(ucd.resp + 46));
+	con_hex2("SENSE", "d10=", be16(ucd.resp + 50), "d12=", be16(ucd.resp + 52));
 }
 
 /*
@@ -99,7 +181,7 @@ static void sense_dump(void)
  * Returns 0 on success, otherwise a code describing the failure stage.
  */
 static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
-    uint32_t *ocs_out, uint32_t *status_out)
+    uint32_t *ocs_out, uint32_t *status_out, int write)
 {
 	static uint8_t tag;
 	zero(&utrl[0], sizeof(utrl[0]));
@@ -107,7 +189,7 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 
 	/* Command UPIU: header (12 bytes), expected length, CDB. */
 	ucd.cmd[0] = 0x01;			/* transaction type: COMMAND */
-	ucd.cmd[1] = len ? 0x40 : 0x00;		/* flags: R (data in) */
+	ucd.cmd[1] = write ? 0x20 : (len ? 0x40 : 0x00);	/* flags: W or R */
 	ucd.cmd[2] = lun;
 	ucd.cmd[3] = ++tag;
 	ucd.cmd[12] = len >> 24;
@@ -118,7 +200,8 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 		ucd.cmd[16 + i] = cdb[i];
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
-	utrl[0].dw0 = (1u << 28) | ((len ? 2u : 0u) << 25) | (1u << 24);	/* UFS storage, dev->host */
+	/* CT=1 (UFS storage), DD: 0=none 1=write 2=read, I=1 */
+	utrl[0].dw0 = (1u << 28) | ((write ? 1u : (len ? 2u : 0u)) << 25) | (1u << 24);
 	utrl[0].dw2 = 0x0f;			/* OCS: invalid until the host updates it */
 	utrl[0].ucdba = (uint32_t)ucd_pa;
 	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
@@ -158,11 +241,280 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	return 0;
 }
 
+/*
+ * One UIC (Unipro) command. The command register is 0x90 and the arguments
+ * 0x94/0x98/0x9c in the UFSHCI 2.x/3.x/4.x layout; the completion is IS
+ * bit 10 and the configuration result code comes back in ARG_2 (0x98).
+ * Returns the result code, or 0xffffffff on timeout.
+ */
+static uint32_t uic(uint32_t cmd, uint32_t arg0, uint32_t arg1, uint32_t arg2)
+{
+	ufs_wr(REG_IS, IS_UIC_COMP);		/* clear a stale completion */
+	ufs_wr(REG_UICARG0, arg0);
+	ufs_wr(REG_UICARG1, arg1);
+	ufs_wr(REG_UICARG2, arg2);
+	ufs_wr(REG_UICCMD, cmd);
+	uint64_t start = ticks();
+	while (!(ufs_rd(REG_IS) & IS_UIC_COMP)) {
+		if (ticks() - start > 19200000) {	/* 1 s */
+			con_hex2("UIC", "cmd=", cmd, "timeout is=", ufs_rd(REG_IS));
+			return 0xffffffffu;
+		}
+	}
+	ufs_wr(REG_IS, IS_UIC_COMP);
+	uint32_t res = ufs_rd(REG_UICARG1) & 0xff;
+	con_hex2("UIC", "cmd=", cmd, "res=", res);
+	return res;
+}
+
+/* DME GET: the value comes back in UIC ARG_3 (0x9c). */
+static uint32_t dme_get(uint32_t mib, uint32_t *val)
+{
+	uint32_t v = 0;
+	uint32_t r = uic(UIC_DME_GET, mib << 16, 0, 0);
+
+	v = ufs_rd(REG_UICARG2);
+	if (val)
+		*val = v;
+	log_num("dme_get", (mib << 16) | (r & 0xff));
+	return r;
+}
+
+/* DME SET: arg1 = MIB << 16, arg3 = the value. */
+static uint32_t dme_set(uint32_t mib, uint32_t val)
+{
+	uint32_t r = uic(UIC_DME_SET, mib << 16, 0, val);
+
+	log_num("dme_set", (mib << 16) | (r & 0xff));
+	return r;
+}
+
+
+/* Write one 4 KiB block to LUN 0 (host to device). */
+static uint32_t write_block(uint32_t lba, const void *buf)
+{
+	uint8_t cdb[10] = { 0x2a, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, 0, 1, 0 };
+	uint32_t ocs, st;
+
+	return scsi(0, cdb, sizeof(cdb), (void *)buf, BLOCK, &ocs, &st, 1);
+}
+
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
 {
 	uint8_t cdb[10] = { 0x28, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, count >> 8, count, 0 };
 	uint32_t ocs, st;
-	return scsi(0, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st);
+	return scsi(0, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st, 0);
+}
+
+/* Wait for HCS to show the UniPro link ready (UIC_COMMAND_READY). */
+static uint32_t wait_ucrdy(void)
+{
+	uint32_t hcs = 0;
+	for (int i = 0; i < 1000000; i++) {
+		hcs = ufs_rd(REG_HCS);
+		if (hcs & HCS_UCRDY)
+			break;
+	}
+	return hcs;
+}
+
+/*
+ * Bring the UniPro link up again the way a host driver does it after a
+ * reset: DME RESET, DME ENABLE, DME LINK STARTUP. The device answers our
+ * SCSI commands with "function not supported" and an empty sense, which
+ * is what a device that never saw the enable/link-startup sequence
+ * looks like. Returns 0 when the link is up afterwards.
+ */
+static int ufs_recover_link(void)
+{
+	uint32_t r;
+
+	con_str("UFS", "recovering the UniPro link (UIC)");
+	r = uic(UIC_DME_RESET, 0, 0, 0);
+	con_hex2("UIC", "dme_reset res=", r, "is=", ufs_rd(REG_IS));
+	con_hex2("UFS", "hcs after reset=", wait_ucrdy(), "hcs=", ufs_rd(REG_HCS));
+	r = uic(UIC_DME_ENABLE, 0, 0, 0);
+	con_hex2("UIC", "dme_enable res=", r, "is=", ufs_rd(REG_IS));
+	r = uic(UIC_DME_LINK_STARTUP, 0, 0, 0);
+	con_hex2("UIC", "link_startup res=", r, "is=", ufs_rd(REG_IS));
+	con_hex2("UFS", "hcs after startup=", wait_ucrdy(), "hcs=", ufs_rd(REG_HCS));
+	con_hex2("UFS ERR", "phy=", ufs_rd(REG_UECPA), "dme=", ufs_rd(REG_UECDME));
+	return (ufs_rd(REG_HCS) & HCS_UCRDY) ? 0 : -1;
+}
+
+
+
+/* UPIU_TRANSACTION_QUERY_REQ and the query opcodes (JESD220). */
+#define UPIU_QUERY_REQ		0x16
+#define QUERY_OP_READ_FLAG	0x05
+#define QUERY_OP_SET_FLAG	0x06
+#define QUERY_IDN_FDEVICEINIT	0x01
+#define QUERY_FUNC_READ		0x01
+#define QUERY_FUNC_WRITE	0x81
+
+/*
+ * One QUERY request.  The UPIU payload is "struct utp_upiu_query":
+ * opcode, idn, index, selector, reserved, length, value, reserved.
+ * The answer arrives in the QUERY response UPIU (type 0x36); its value
+ * field sits at offset 20 (12 byte header + 8).
+ */
+static uint32_t query(uint8_t opcode, uint8_t idn, uint32_t value, uint32_t *rsp_value)
+{
+	static uint8_t tag;
+	uint32_t ocs = 0, st = 0, rc, rtype, rcode;
+
+	zero(&utrl[0], sizeof(utrl[0]));
+	zero(&ucd, sizeof(ucd));
+
+	ucd.cmd[0] = UPIU_QUERY_REQ;
+	ucd.cmd[1] = 0x00;
+	ucd.cmd[2] = 0x00;			/* LUN */
+	ucd.cmd[3] = ++tag;
+	ucd.cmd[4] = 0x00;			/* command set type / IID */
+	ucd.cmd[5] = opcode == QUERY_OP_READ_FLAG ? QUERY_FUNC_READ : QUERY_FUNC_WRITE;
+	ucd.cmd[16] = opcode;
+	ucd.cmd[17] = idn;
+	ucd.cmd[18] = 0;			/* index */
+	ucd.cmd[19] = 0;			/* selector */
+	ucd.cmd[22] = 0;			/* length */
+	ucd.cmd[23] = 0;
+	ucd.cmd[24] = value >> 24;
+	ucd.cmd[25] = value >> 16;
+	ucd.cmd[26] = value >> 8;
+	ucd.cmd[27] = value;
+
+	uintptr_t ucd_pa = (uintptr_t)&ucd;
+	utrl[0].dw0 = (1u << 28) | (1u << 24);	/* CT=1 (UFS storage), DD=0, I=1 */
+	utrl[0].dw2 = 0x0f;
+	utrl[0].ucdba = (uint32_t)ucd_pa;
+	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
+	utrl[0].resp = (512u / 4) << 16 | (512u / 4);
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	ufs_wr(REG_UTRLDBR, 1);
+	uint64_t start = ticks();
+	while (ufs_rd(REG_UTRLDBR) & 1) {
+		if (ticks() - start > 19200000) {
+			ufs_wr(REG_UTRLCLR, ~1u);
+			log_num("query_timeout", opcode);
+			return 0xffffffffu;
+		}
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	rc = utrl[0].dw2 & 0xff;
+	rtype = ucd.resp[0];
+	rcode = ucd.resp[6];
+	if (rsp_value)
+		*rsp_value = be32(ucd.resp + 20);
+	log_num("query_ocs", rc);
+	log_num("query_type", rtype);
+	log_num("query_rc", rcode);
+	(void)ocs;
+	(void)st;
+	return rc ? rc : rcode;
+}
+
+/*
+ * The UFS 3.0/4.0 device initialisation handshake: the host sets the
+ * fDeviceInit flag and waits for the device to clear it again.  Linux does
+ * this in ufshcd_complete_dev_init() before it talks to the device.
+ */
+static void fdeviceinit_handshake(void)
+{
+	uint32_t v = 0, rc;
+
+	log_str("=== fDeviceInit handshake ===\n");
+	rc = query(QUERY_OP_SET_FLAG, QUERY_IDN_FDEVICEINIT, 0, 0);
+	log_num("set_flag_rc", rc);
+	for (int i = 0; i < 50; i++) {
+		v = 0xffffffff;
+		rc = query(QUERY_OP_READ_FLAG, QUERY_IDN_FDEVICEINIT, 0, &v);
+		log_num("read_flag_rc", rc);
+		log_num("fdeviceinit", v);
+		if (rc == 0 && !(v & 1))
+			break;
+	}
+}
+
+/*
+ * Bring the UniPro link and the device into the state a host driver sets up
+ * after a reset, then see whether the device answers SCSI commands.
+ *
+ * The UFS 4.0 device descriptor says bInitialPowerMode = 01h, i.e. the device
+ * comes up in Sleep power mode and the host has to move it to Fast/Active
+ * with a DME SET of the PA PowerMode attribute.  The reference driver
+ * (Linux ufshcd_dme_change_power_mode) does:
+ *   PA_RXGEAR / PA_ACTIVERXDATALANES / PA_RXTERMINATION /
+ *   PA_TXGEAR / PA_ACTIVETXDATALANES / PA_TXTERMINATION / PA_HSSERIES
+ *   and finally PA_PWRMODE = (FAST<<4)|FAST.
+ * Steps 1..n are tried one after another, each one followed by a TUR, so a
+ * single boot can find out which one the device needs.
+ */
+static uint32_t try_tur(const char *what)
+{
+	static const uint8_t tur[6] = { 0x00 };
+	uint32_t ocs = 0, st = 0;
+	uint32_t rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+
+	log_str(what);
+	log_str(":");
+	log_num("  tur_rc", rc);
+	log_num("  ocs_st", (ocs << 8) | st);
+	return rc;
+}
+
+static void ufs_power_mode_experiment(void)
+{
+	uint32_t lanes_rx = 0, lanes_tx = 0, gear_rx = 0, gear_tx = 0, v = 0;
+
+	log_str("=== power mode experiment ===\n");
+	dme_get(PA_CONNECTEDRXDATALANES, &lanes_rx);
+	dme_get(PA_CONNECTEDTXDATALANES, &lanes_tx);
+	dme_get(PA_MAXRXHSGEAR, &gear_rx);
+	dme_get(PA_MAXRXPWMGEAR, &v);
+	log_num("lanes_rx", lanes_rx);
+	log_num("lanes_tx", lanes_tx);
+	log_num("gear_rx", gear_rx);
+	dme_get(PA_PWRMODE, &v);
+	log_num("pwrmode_before", v);
+
+	try_tur("before");
+
+	/* 0: the UFS 4.0 device initialisation handshake */
+	fdeviceinit_handshake();
+	try_tur("after_fdeviceinit");
+
+	/* 1: the power mode change the reference driver does at the end of probe */
+	dme_set(PA_RXGEAR, gear_rx);
+	dme_set(PA_ACTIVERXDATALANES, lanes_rx);
+	dme_set(PA_RXTERMINATION, 1);
+	dme_set(PA_TXGEAR, gear_rx);
+	dme_set(PA_ACTIVETXDATALANES, lanes_tx);
+	dme_set(PA_TXTERMINATION, 1);
+	dme_set(PA_HSSERIES, PA_HS_MODE_B);
+	dme_set(PA_PWRMODE, PWRMODE_FAST);
+	dme_get(PA_PWRMODE, &v);
+	log_num("pwrmode_after", v);
+	try_tur("after_pwrmode");
+
+	/* 2: a plain reset + enable + link startup, then the power mode again */
+	uic(UIC_DME_RESET, 0, 0, 0);
+	uic(UIC_DME_ENABLE, 0, 0, 0);
+	uic(UIC_DME_LINK_STARTUP, 0, 0, 0);
+	dme_set(PA_PWRMODE, PWRMODE_FAST);
+	try_tur("after_reset_startup");
+
+	/* 3: the well known LUN (UPIU LUN 0xd0) with START STOP UNIT, active */
+	{
+		static const uint8_t ssu[6] = { 0x1e, 0, 0, 0, 0x00, 0 };
+		uint32_t ocs = 0, st = 0;
+		uint32_t rc = scsi(0xd0, ssu, sizeof(ssu), 0, 0, &ocs, &st, 0);
+
+		log_num("ssu_wlun_rc", rc);
+		log_num("ssu_wlun_st", (ocs << 8) | st);
+		try_tur("after_ssu");
+	}
 }
 
 static uint64_t le64(const uint8_t *p)
@@ -185,6 +537,12 @@ static const char *fs_type(uint32_t lba)
 		return "ext4";
 	return "other";
 }
+
+static uint32_t cache_first, cache_last;	/* the scratch ext4 partition we log into */
+
+/* The last 4 KiB block of the "cache" partition (sda29, 128 MiB at LBA
+ * 176128): a scratch area the recovery can read back with dd. */
+#define LOG_LBA		208895u
 
 /* One line per GPT entry of at least 64 MiB: name, first LBA, size in MiB (4K blocks). */
 static void list_partitions(uint32_t entry_lba, uint32_t nent)
@@ -209,6 +567,10 @@ static void list_partitions(uint32_t entry_lba, uint32_t nent)
 		if (((last - first + 1) >> 8) < 64)	/* keep the screen to the big ones */
 			continue;
 		con_hex2(name, "lba=", (uint32_t)first, "MiB=", (uint32_t)((last - first + 1) >> 8));
+		if (!strcmp(name, "cache")) {
+			cache_first = (uint32_t)first;
+			cache_last = (uint32_t)last;
+		}
 		if (!strcmp(name, "userdata") || !strcmp(name, "cust") ||
 		    !strcmp(name, "cache"))
 			con_str(" fs", fs_type((uint32_t)first));
@@ -224,6 +586,12 @@ void test_ufs(void)
 	con_hex2("UFS", "is=", ufs_rd(REG_IS), "rsr=", ufs_rd(REG_UTRLRSR));
 	con_hex2("UFS", "utrlba=", ufs_rd(REG_UTRLBA), "hi=", ufs_rd(REG_UTRLBAU));
 	con_hex2("UFS", "dbr=", ufs_rd(REG_UTRLDBR), "nutrs=", (cap & 0x1f) + 1);
+	con_hex2("UFS", "pid=", ufs_rd(REG_PID), "mid=", ufs_rd(REG_MID));
+	con_hex2("UFS", "mcqcap=", ufs_rd(REG_MCQCAP), "extcap=", ufs_rd(REG_EXTCAP));
+	/* The UIC error codes say why the last UIC command failed. */
+	con_hex2("UFS ERR", "phy=", ufs_rd(REG_UECPA), "dlink=", ufs_rd(REG_UECDL));
+	con_hex2("UFS ERR", "net=", ufs_rd(REG_UECN), "trans=", ufs_rd(REG_UECT));
+	con_hex2("UFS ERR", "dme=", ufs_rd(REG_UECDME), "ie=", ufs_rd(REG_IE));
 
 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
 		con_str("UFS", "host not enabled/ready: stop");
@@ -255,24 +623,39 @@ void test_ufs(void)
 	static const uint8_t tur[6] = { 0x00 };
 	/* A first command may report a unit attention; retry a few times. */
 	for (int i = 0; i < 3; i++) {
-		rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st);
+		rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
 		con_hex2("UFS TUR", "rc=", rc, "ocs/st=", ocs << 8 | st);
 		if (!rc)
 			break;
 	}
 
+	log_num("tur_rc", rc);
+	log_num("tur_st", ocs << 8 | st);
+
+	/*
+	 * The device answers but refuses every command: it is still in the
+	 * Sleep power mode it came up in (bInitialPowerMode = 01h).  Walk
+	 * through the candidate ways of waking it up.
+	 */
+	if (rc) {
+		ufs_power_mode_experiment();
+		rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+		con_hex2("UFS TUR2", "rc=", rc, "ocs/st=", ocs << 8 | st);
+		log_num("tur2_rc", rc);
+	}
+
 	static const uint8_t cap10[10] = { 0x25 };	/* READ CAPACITY(10) */
-	rc = scsi(0, cap10, sizeof(cap10), data, 8, &ocs, &st);
+	rc = scsi(0, cap10, sizeof(cap10), data, 8, &ocs, &st, 0);
 	con_hex2("UFS CAP", "rc=", rc, "ocs/st=", ocs << 8 | st);
 	if (!rc)
 		con_hex2("UFS LUN0", "lastlba=", be32(data), "blk=", be32(data + 4));
 
 	/* READ(10) LBA 0, 2 blocks: protective MBR and the GPT header. */
 	static const uint8_t rd10[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };
-	rc = scsi(0, rd10, sizeof(rd10), data, 2 * BLOCK, &ocs, &st);
+	rc = scsi(0, rd10, sizeof(rd10), data, 2 * BLOCK, &ocs, &st, 0);
 	con_hex2("UFS READ", "rc=", rc, "ocs/st=", ocs << 8 | st);
 	if (rc)
-		return;
+		goto log_it;
 	con_hex2("UFS MBR", "sig=", data[510] | data[511] << 8, "type=", data[450]);
 	const uint8_t *gpt = data + BLOCK;
 	char sig[9];
@@ -284,7 +667,54 @@ void test_ufs(void)
 	uint32_t elba = gpt[72] | gpt[73] << 8;
 	con_hex2("UFS GPT", "entries=", nent, "lba=", elba);
 	if (esz != 128 || nent > 128)
-		return;
+		goto log_it;
 	list_partitions(elba, nent);
+log_it:
+
+	/*
+	 * Publish the log into the scratch "cache" partition so that it can be
+	 * read back from the recovery (the phone resets into the recovery with
+	 * the boot reason it was started with).
+	 */
+	if (1) {
+		uint8_t *blk = data;
+		uint32_t ocs = 0, st = 0, wrc;
+		unsigned n = loglen < BLOCK - 1 ? loglen : BLOCK - 1;
+
+		for (unsigned i = 0; i < BLOCK; i++)
+			blk[i] = 0;
+		for (unsigned i = 0; i < n; i++)
+			blk[i] = logbuf[i];
+		wrc = write_block(LOG_LBA, blk);
+		con_hex2("UFS LOG", "lba=", LOG_LBA, "rc=", wrc);
+		log_num("log_write_rc", wrc);
+	}
+	con_str("UFS", "log written to cache partition");
+}
+
+/* The whole log on the panel, 48 chars per line. */
+void ufs_print_log(void)
+{
+	unsigned i = 0;
+
+	con_clear(YELLOW);
+	con_str("UFSLOG", "experiment log");
+	while (i < loglen) {
+		unsigned j = i;
+		char line[49];
+
+		while (j < loglen && j - i < 48 && logbuf[j] != '\n')
+			j++;
+		unsigned n = j - i;
+		if (n > 48)
+			n = 48;
+		for (unsigned k = 0; k < n; k++)
+			line[k] = logbuf[i + k];
+		line[n] = 0;
+		con_str("", line);
+		if (j < loglen && logbuf[j] == '\n')
+			j++;
+		i = j;
+	}
 }
 
