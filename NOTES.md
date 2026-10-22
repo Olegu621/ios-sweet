@@ -348,6 +348,34 @@ NOTES) and PMXR2230 RT `0x8d10`; compare with the recovery's own pmic
 drivers, which are already bound (`pmic_pwrkey`, `pmic_resin` exist as input
 devices there).
 
+#### Ready-to-run way to the QMI encoding (recovery kernel is on disk)
+
+`research/diagnostics-20261022/recovery_a.img` (100 MiB, pulled from
+`/dev/block/by-name/recovery_a`) is a boot image v2; unpack it with
+`python3 tools/unpack_bootv2.py <img> <dir> 4096` and take the `kernel`
+(an aarch64 raw Image). The running recovery kernel has a working SPMI stack,
+so the command encoding can be read out of the image itself:
+
+1. In the raw Image find the ASCII markers `kallsyms_offsets`,
+   `kallsyms_relative_base`, `kallsyms_num_syms`, `kallsyms_names`,
+   `kallsyms_token_table`, `kallsyms_token_index` (they live in .rodata).
+2. Symbol values are `kallsyms_relative_base + kallsyms_offsets[i]`; the name
+   of symbol i is decoded with the token table/token index (standard Linux
+   kallsyms layout, same scheme as the BTF parsing already used here).
+3. Find `spmi_read_cmd` / `spmi_register_read` / `spmi_xfer` and compute the
+   file offset: `kernel_offset + (vaddr - text_base)` (the boot image header
+   carries the text offset).
+4. `llvm-objdump -D -b binary -m aarch64 --start-address=... --stop-address=...`
+   on that window: the 32-bit word the function writes into SPMI_MC_CMD *is*
+   the QMI encoding we need (APID in the upper bits, register address in the
+   lower ones, plus the READ/WRITE opcode).
+
+The SPMI arbiter windows on this phone (from the live DT):
+`cnfg 0xc42d000 (0x4000)`, `core 0xc400000 (0x3000)`, `chnls 0xc500000`,
+`obsrvr 0xc440000`, `intr 0xc4c0000`; APID map `core + 0x2000 + 4*apid`,
+ownership `cnfg + 4*apid`, bus count `core + 4` bits[10:0] (all recorded in
+the previous handoff).
+
 ### Current completion and next port work
 
 1. Kernel panic investigation / safe disk diagnostics / super geometry repair /
