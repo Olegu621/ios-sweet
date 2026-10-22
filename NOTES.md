@@ -4,7 +4,8 @@
 
 ## Active handoff (peridot, 2026-10-22, Codex continuation)
 
-**This section supersedes the older 06:00 handoff. Phone is in recovery.**
+**This section supersedes all older handoffs. Phone is running the verified
+0092 stable temporary boot, with the iOS lock screen confirmed by the user.**
 
 - Latest OpenCode session was read from its SQLite DB. Its last action was a
   successful temporary boot of `shim-boot-0053p.img` (kernel CI 39723628466,
@@ -85,7 +86,7 @@
   MMIO on SM8635: the root compatible string gates those old probes. Both C/C++
   files compile locally. Image `shim/out/shim-boot-0091-ui.img` was temporarily
   booted with sweetfb_noconsole=1. User observes the **Apple logo** (first GUI
-  rendering succeeds), but no home screen yet. Next phone log is being pulled.
+  rendering succeeds). Saved phone log and subsequent fix are described below.
 - Patch **0092**, commit **d82bfc9**: early trace/panic text also enters the main
   ring; try-lock + polled, bounded UFS flush before normal panic debugger path.
   Optional sweetpanicreset=1 resets after capture; sweetdiagreset=N (30..3600 s)
@@ -93,7 +94,7 @@
   immediately after UFS init, for testing capture without random hardware faults.
   These flags are OFF by default. Local C compilation and actual flush function
   host harness (guards, busy lock, bounds, ring/header, failed I/O) pass.
-  Hardware validation is still required.
+  Hardware panic flush/reset validation PASSED; see 0092 results below.
 - `tools/peridot-cycle.py IMAGE OUT` automates recovery -> set 32-byte BCB
   boot-recovery (backed up) -> temporary fastboot boot -> wait for diagnostic
   return -> disk log pull. It waits until recovery uptime >=20 s: early recovery
@@ -157,11 +158,49 @@
 - Ready image `shim/out/shim-boot-0092-mac.img`: SAME CI0092 kernel, new
   `peridot-0092-mac.adt`, sweetdiagreset=180. Sampler now uses the actual
   16-char p_comm names containermanager,mobileactivation (17-char executable
-  names did not match in previous test). Hardware ADT test PENDING.
-- Before next boot, completing read-only backup of live 16-GiB HFS root into
+  names did not match in previous test). Hardware ADT test PASSED below.
+- Completed read-only backup of live 16-GiB HFS root into
   `research/diagnostics-20261022/live-root-0092.img`; recovery has no HFS driver.
   Initial raw read stopped at 4991 MiB; resumed at exactly that aligned offset
-  with gzip transport, validates final byte count. Do not boot while copying.
+  with gzip transport; final byte count is exactly 17179869184. MiB 0,4990,
+  4991,16383 compare byte-for-byte with fresh device reads, including both
+  sides of the transport restart. Mounted read-only as live-root-ro.
+- Live mobileactivationd log proves `should_hactivate: true` and
+  `Activation State: Activated`. Do not reseed/reflash activation state.
+- Offline fsck -fn reports unclean journal and legacy Linux-created hardlink
+  flags/chains (already handled explicitly by kernel patches 0030/0041 etc.).
+  A SEPARATE reflink/sparse copy `live-root-0092-check.img` was repaired/rechecked
+  successfully by host fsck -fy. Neither the original snapshot nor phone was
+  modified; do not apply that stale check copy to the phone or attribute the
+  early panic to these hardlink diagnostics.
+
+### Confirmed iOS lock screen and final boot image
+
+- Commit **af91366** ADT radio identity fix is hardware-proven: automatic
+  `cycle-0092-mac/console.txt` (202744 bytes, 180-second capture) has no kernel
+  panic. lsd no longer waits in MobileGestalt; sample shows active XPC setup,
+  device identifier cache save and completion of its previous journal recovery
+  wait. `samples-0092-mac-full.txt` contains symbolicated stacks. backboardd
+  continues framebuffer swaps, many new daemons launch. **User directly
+  confirms: "экран блокировки видно".** No userspace service binary was patched.
+- Final temporary image **`shim/out/shim-boot-0092-stable.img`**, SHA256
+  **`5043c9c7a946204e3d24cad2496cff4f63c33ee063b62a2da13bec545cf1f829`**.
+  Kernel CI39728179094 SHA256
+  `94b195c062e6d8de1249abab9362bb237a73c6591f668c081e21a82d409bb7f3`;
+  ADT `shim/out/peridot-0092-mac.adt`; safe fixed shim. No sweetpanicprobe,
+  sweetpanicreset or sweetdiagreset flags. Logs every10s, sampler off.
+  Exact args and image hash are recorded in `stable-0092/boot.json` locally.
+- Recovery BCB command was confirmed EMPTY before final boot. Temporary
+  fastboot boot succeeded; boot partitions were not flashed. **User confirmed
+  the lock screen again on the ordinary image without a reset timer.**
+- Latest normal boots 0090,0091,0092-sample,0092-mac show no kernel panic.
+  Controlled panic was deliberate and saved/reset correctly. Exact cause of
+  the ORIGINAL unsaved panic remains unprovable; unbounded old SCSI recursion,
+  wrong READ_DESC function and incompatible old peripheral MMIO are distinct
+  real defects, not a recovered original panic backtrace.
+- Remaining PORT limitations: physical buttons, FT3683G SPI touch, USB iOS
+  gadget are not ported to SM8635. The guard deliberately withholds SM7150
+  probes. Lock-screen rendering does not imply input or radio support.
 
 ### Peripheral facts gathered read-only in recovery
 
@@ -181,21 +220,18 @@
   `qcom,pmxr2230@1`, reg=<1 0>), RT 0x8d10. Do not infer SID7 from a random
   debug-regmap read.
 
-### Immediate next actions
+### Current completion and next port work
 
-1. 0092 CI and hardware panic capture/reset test DONE. Collect the running
-   150-second unattended UI diagnostic DONE. Finish live-root backup, then
-   boot 0092-mac through peridot-cycle.py and compare lsd/SpringBoard progress.
-   No unexplained kernel panic in 0090/0091/0092 normal boots.
-2. Geometry repair DONE and readback verified. BCB command was temporarily set
-   to `boot-recovery` (32 bytes, backup saved) so the safe shim PSCI reset should
-   return to recovery automatically. Safe shim boot accepted by fastboot.
-   Read pstore when it returns; verify super metadata stays unchanged.
-3. Boot 0090 temporarily, collect first panic via recovery pstore. For a baseline
-   that avoids unported SM7150 peripherals use `sweetkeys=0 sweettouch=0 sweetusb=0`.
-   These drivers still contain SWEET MMIO constants incompatible with SM8635;
-   do not label their failures UFS errors. Next isolate one probe at a time.
-4. Update this handoff with actual hardware logs and final image hashes.
+1. Kernel panic investigation / safe disk diagnostics / super geometry repair /
+   framebuffer sizing / LaunchServices stall are handled to the verified results
+   above. Preserve the current working stable image and saved logs.
+2. No manual phone action is pending. The user has the ordinary lock screen.
+   Further iOS bring-up means native SM8635 keys, FT3683G SPI touch and USB31
+   drivers, rather than re-enabling old SM7150 probes.
+3. If a NEW unexplained panic occurs, use saved first-panic UFS capture. For
+   repeatable automatic diagnostics, use peridot-cycle.py with an image carrying
+   sweetdiagreset and/or sweetpanicreset, starting in root recovery. Ramoops
+   retention was not successful on this hardware; do not rely on pstore.
 
 References checked: Linux v6.1 `fs/pstore/ram_core.c`, `fs/pstore/ram.c`,
 `include/ufs/ufs.h`; AOSP `fs_mgr/liblp/include/liblp/metadata_format.h`.
