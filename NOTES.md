@@ -91,6 +91,35 @@ shim run whose log is read back over adb.**
 If any of them makes the TUR work, the whole log (including the full 18 byte
 sense data) is written into the cache partition and can be read back.
 
+### CONFIRMED WORKING UFS 4.0 BRING UP (2026-10-22, from the shim log)
+The shim log (`dd if=/dev/block/sda29 bs=4096 skip=32764 count=4`) proves the
+sequence and that the device then answers SCSI commands:
+1. **UIC registers are at 0x90/0x94/0x98/0x9c** (UFSHCI 2.x/3.x/4.x). The
+   configuration result is in **ARG_2** (0x98), a DME GET value in **ARG_3**
+   (0x9c). Patch 0087 used the 1.x layout (0x10 = CONTROLLER_PID, read only),
+   so no UIC command ever reached the controller.
+2. **DME RESET (0x14) -> DME ENABLE (0x12) -> DME LINK STARTUP (0x16)**, then
+   take the transfer request list over again (the reset invalidates it).
+   Before the reset the fDeviceInit QUERY is answered with 0xff ("not
+   supported" - the device is not initialised yet), after it with 0.
+3. **NOP OUT** (UPIU type 0x00, answered with a NOP IN), then the
+   **fDeviceInit handshake** (QUERY SET_FLAG / READ_FLAG, idn 1, the query
+   payload starts at UPIU offset 12), then the device and configuration
+   descriptor reads, then the **PA layer power mode change**
+   (PA_RXGEAR 0x1583, PA_ACTIVERXDATALANES 0x1580, PA_RXTERMINATION 0x1584,
+   PA_TXGEAR 0x1568, PA_ACTIVETXDATALANES 0x1560, PA_TXTERMINATION 0x1569,
+   PA_HSSERIES 0x156a = 2, PA_PWRMODE 0x1571 = 0x11).
+4. **Retry a refused command once**: after the reset the first command comes
+   back with a unit attention (sense ASC 0x29, "power on, reset or bus device
+   reset occurred") and only the retry gets through - in the log the first TUR
+   after the init returns CHECK CONDITION with ASC 0x29, the second one GOOD.
+   The recovery's Linux driver does the same.
+
+The XNU driver has this in patch **0089** (`xnu/patches/0089-sweet-ufs-device-init.patch`,
+CI 39723628466). The first boot with it panicked: the unit attention retry was
+written as a recursion (ufs_scsi_retry called itself with the flag reset) and
+overflowed the stack - fixed by a loop (CI 39723628466 is the fixed build).
+
 ### Next actions (in order)
 1. **Power cycle the phone** (hold the power button ~10 s). It is in Android with a
    wedged USB gadget; the iOS rootfs in `userdata` was most likely reformatted by
