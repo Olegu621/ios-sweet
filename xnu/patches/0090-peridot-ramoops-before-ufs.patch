@@ -1,0 +1,156 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -49,6 +49,7 @@
+ extern void thread_deallocate(thread_t);
+ extern int hz;
+ static void sweet_log_start(void);
++static void sweet_ramoops_init(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+@@ -570,7 +571,8 @@
+ 	ucd->cmd[2] = 0x00;                     /* LUN */
+ 	ucd->cmd[3] = ++su.tag;
+ 	ucd->cmd[4] = 0x00;                     /* command set type / IID */
+-	ucd->cmd[5] = (opcode == 0x05) ? 0x01 : 0x81;   /* query function */
++	ucd->cmd[5] = (opcode == 0x01 || opcode == 0x03 || opcode == 0x05) ?
++	    0x01 : 0x81;                       /* standard read / write request */
+ 	/*
+ 	 * The query payload starts right behind the 12 byte UPIU header
+ 	 * (struct utp_upiu_query), not behind a data length field like the
+@@ -990,6 +992,9 @@
+ 	char want[64] = "userdata";
+ 	int error;
+ 
++	/* Keep the failing UFS bring-up and panic even before disk logs work. */
++	sweet_ramoops_init();
++
+ 	if (SecureDTLookupEntry(NULL, "/sweet-ufs", &node) != kSuccess ||
+ 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
+ 	    size < 2 * sizeof(uintptr_t)) {
+@@ -1095,6 +1100,90 @@
+ static int sweet_log_chan;
+ static uint32_t sweet_log_secs = SWEET_LOG_SECS;
+ 
++/* Linux fs/pstore/ram_core.c's non-ECC console ring (12-byte header).
++ * The ADT names recovery-reserved RAM outside the XNU-managed bank.
++ * Map it uncached: a panic must not require UFS, cache flushing or a worker.
++ */
++struct sweet_ramoops_header {
++	uint32_t sig, start, size;
++	uint8_t data[];
++};
++static volatile struct sweet_ramoops_header *sweet_ramoops;
++static uint32_t sweet_ramoops_capacity;
++static uint32_t _Atomic sweet_ramoops_busy;
++
++static void
++sweet_ramoops_append(const char *c, int size)
++{
++	volatile struct sweet_ramoops_header *r = sweet_ramoops;
++	if (r == NULL || size <= 0 ||
++	    !os_atomic_cmpxchg(&sweet_ramoops_busy, 0, 1, acquire)) {
++		return; /* Never wait for a stopped CPU or a nested panic. */
++	}
++	uint32_t at = r->start, used = r->size;
++	for (int i = 0; i < size; i++) {
++		r->data[at++] = (uint8_t)c[i];
++		if (at == sweet_ramoops_capacity) {
++			at = 0;
++		}
++		if (used < sweet_ramoops_capacity) {
++			used++;
++		}
++	}
++	__builtin_arm_dsb(0xf);
++	r->start = at;
++	r->size = used;
++	__builtin_arm_dsb(0xf);
++	os_atomic_store(&sweet_ramoops_busy, 0, release);
++}
++
++/* Early panic/trace bypasses _cnputs; retain that path too. */
++void sweet_ramoops_putc(char c);
++void
++sweet_ramoops_putc(char c)
++{
++	sweet_ramoops_append(&c, 1);
++}
++
++static void
++sweet_ramoops_init(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	uint32_t on = 1;
++	PE_parse_boot_argn("sweetramoops", &on, sizeof(on));
++	if (!on || sweet_ramoops != NULL ||
++	    SecureDTLookupEntry(NULL, "/sweet-ramoops", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size != 2 * sizeof(uintptr_t) || reg[1] < PAGE_SIZE || reg[1] > (4u << 20)) {
++		return;
++	}
++	volatile struct sweet_ramoops_header *r =
++	    (volatile struct sweet_ramoops_header *)ml_io_map(reg[0], reg[1]);
++	if (r == NULL) {
++		return;
++	}
++	sweet_ramoops_capacity = (uint32_t)reg[1] - sizeof(*r);
++	r->sig = 0;
++	r->start = 0;
++	r->size = 0;
++	__builtin_arm_dsb(0xf);
++	r->sig = 0x43474244; /* PERSISTENT_RAM_SIG, console type has seed 0. */
++	__builtin_arm_dsb(0xf);
++	sweet_ramoops = r;
++	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
++	uint64_t pos = total > sweet_ramoops_capacity ? total - sweet_ramoops_capacity : 0;
++	while (pos < total) {
++		uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
++		uint32_t n = (uint32_t)MIN(total - pos, (uint64_t)(SWEET_LOG_SIZE - off));
++		sweet_ramoops_append(sweet_log_ring + off, (int)n);
++		pos += n;
++	}
++	printf("SWEET RAMOOPS: console at 0x%lx, %u bytes, recovery pstore format\n",
++	    (unsigned long)reg[0], sweet_ramoops_capacity);
++}
++
+ /* Called for all console output, any context: never blocks. */
+ void sweet_log_append(const char *c, int size);
+ 
+@@ -1104,6 +1193,7 @@
+ 	if (size <= 0) {
+ 		return;
+ 	}
++	sweet_ramoops_append(c, size);
+ 	uint64_t at = os_atomic_add_orig(&sweet_log_total, (uint64_t)size, relaxed);
+ 	for (int i = 0; i < size; i++) {
+ 		sweet_log_ring[(at + (uint64_t)i) % SWEET_LOG_SIZE] = c[i];
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -24,6 +24,7 @@
+ #define EARLY_COLS (EARLY_WIDTH / EARLY_CELL_W)
+ 
+ extern unsigned char iso_font[256 * 16];
++extern void sweet_ramoops_putc(char c);
+ 
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+@@ -44,6 +45,7 @@
+ void
+ sweet_early_putc(char c)
+ {
++	sweet_ramoops_putc(c);
+ 	if (early_disabled) {
+ 		return;
+ 	}
+@@ -115,7 +117,7 @@
+ void
+ sweet_early_panic(const char *fmt, va_list *args)
+ {
+-	if (early_disabled || early_panicking) {
++	if (early_panicking) {
+ 		return;
+ 	}
+ 	early_panicking = 1;

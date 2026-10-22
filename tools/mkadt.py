@@ -205,6 +205,13 @@ def build(seed=None, qemu=False, highmem=False):
         ('compatible', cstr('qcom,ufshc')),
         ('reg', u64(UFS, UFS_SIZE)),
     ])
+    # Recovery's live DT reserves 4 MiB here: 2 MiB console, 2 MiB pmsg,
+    # no ECC. Reuse the console format so recovery exposes XNU's last log
+    # as /sys/fs/pstore/console-ramoops-0 after a warm reset.
+    ramoops = node('sweet-ramoops', [
+        ph(),
+        ('reg', u64(0xa7000000, 0x200000)),
+    ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
     # An absent pmap-max-asids property selects XNU's own MAX_ASIDS default.
@@ -236,7 +243,7 @@ def build(seed=None, qemu=False, highmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs, ramoops]))
 
 
 if __name__ == '__main__':
