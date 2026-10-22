@@ -12,10 +12,10 @@ index 6630131..6b72bec 100644
  bsd/dev/munge.c 			optional config_requires_u32_munging
 diff --git a/bsd/dev/sweet_spmi_peridot.c b/bsd/dev/sweet_spmi_peridot.c
 new file mode 100644
-index 0000000..134fa27
+index 0000000..70040c2
 --- /dev/null
 +++ b/bsd/dev/sweet_spmi_peridot.c
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,154 @@
 +/*
 + * Battery-only adaptation of input/sweet_keys.c, observer EXT_READL.
 + * PMIC READ ONLY. The only MMIO store issues a one-byte read command.
@@ -58,10 +58,14 @@ index 0000000..134fa27
 +	uint16_t found = SP_NO_APID;
 +	for (unsigned i = 0; i < sp_count; ++i) {
 +		uint32_t map = sp_rd(sp_core, 0x2000u + 4u * i);
++		uint32_t map2 = sp_rd(sp_core, 0x900u + 4u * i);
++		if (!map) {
++			map = map2;
++		}
 +		if (!map || ((map >> 8) & 0xfffu) != ppid) {
 +			continue;
 +		}
-+		unsigned owner = sp_rd(sp_cfg, 4u * i) & 7u;
++		unsigned owner = (sp_rd(sp_cfg, 4u * i) | sp_rd(sp_cfg, 0x700u + 4u * i)) & 7u;
 +		if (found == SP_NO_APID || owner == 0) {
 +			found = (uint16_t)i;
 +		}
@@ -89,8 +93,8 @@ index 0000000..134fa27
 +	}
 +	uint32_t arb_version = sp_rd(sp_core, 0);
 +	sp_count = sp_rd(sp_core, 4) & 0x7ffu;
-+	if (arb_version < 0x50000000u || arb_version >= 0x70000000u ||
-+	    !sp_count || sp_count > 512) {
++	if (arb_version < 0x50000000u || arb_version >= 0x90000000u ||
++	    !sp_count || sp_count > 1024) {
 +		printf("SWEET SPMI: unsupported SPMI arb=%#x APIDs=%u\n",
 +		    arb_version, sp_count);
 +		return -1;
