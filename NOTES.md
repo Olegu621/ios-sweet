@@ -4,8 +4,43 @@
 
 ## Active handoff (peridot, 2026-10-22, Codex continuation)
 
-**This section supersedes all older handoffs. Phone is running the verified
-0092 stable temporary boot, with the iOS lock screen confirmed by the user.**
+**Latest continuation (Codex, after OpenCode): phone is in root recovery.
+SPMI/key patch 0097 is prepared and locally validated; hardware test pending.
+This paragraph and the next section override stale device/status claims below.**
+
+### 0097 native peridot keys — current work
+
+- Reviewed OpenCode continuation through commit c547fb7. Its final CI
+  39750202490 succeeded and applied 0095, but was not hardware tested.
+  Earlier 0095/0096 phone logs rejected arbiter 0x70010000 / 896 APIDs.
+  OpenCode used old peridot-high.adt without the MAC identity fix: do not reuse
+  that ADT. Use peridot-0092-mac.adt or freshly generate current --highmem.
+- 0097 fixes the PPID (sid<<8 | addr>>8), 512/1024 bounds, and mixed v5/v7
+  register tables; removes early constructor and calls initialization ONLY
+  in the SM8635 branch after UFS diagnostics start. v7 bus0/EE0 only.
+  Single poller owns observer read channels; no PMIC writes or GPIO changes.
+- Linux reference IS AVAILABLE: drivers/spmi/spmi-pmic-arb.c (v6.12 primary
+  source, also local spmi-pmic-arb.c). EXT_READL opcode=1; command=1<<27 |
+  (addr&0xff)<<4. Older OpenCode claims that "QMI encoding is missing" are
+  incorrect and superseded. No blind opcode probing or recovery reversing
+  is needed.
+- Recovery read-only reference in pmic-keys-reference.txt: PMK8550 0x1305=09,
+  0x1310=10; PMXR2230 SID1 GPIO6 0x8d05=13, 0x8d40=00, 0x8d46=80,
+  0x8d10=01. Verified live DT: power bit7, resin=VOLUME DOWN bit6;
+  volume-up is active-low GPIO6 (not resin). Debug regmap cursors restored.
+- 0097 validates those types/configuration before enabling each channel,
+  polls at20ms, debounces two equal polls, delivers sweet_hid_key 0/1/2,
+  releases a down key on channel failure, disables failed/late lanes.
+  sweetkeys=0 disables the driver. Old touch/USB guards remain.
+- Local two-file cross-compile passed; patch applicability and exact source
+  match passed. Harness extracting actual selector/read/debounce code passes
+  ASan/UBSan: owner preference, PPID, APIDs895/1023, bounds, timeout/denied
+  channels, read-only command, bounce and failure release.
+- Next: CI0097, verify patch application/artifact SHA, build with MAC-fixed ADT
+  + safe shim, use peridot-cycle.py with sweetdiagreset=180 sweetpanicreset=1.
+  Compare PMIC values to recovery and ask user for separate short presses of
+  power/volume up/volume down. No new image booted yet.
+
 
 - Latest OpenCode session was read from its SQLite DB. Its last action was a
   successful temporary boot of `shim-boot-0053p.img` (kernel CI 39723628466,
