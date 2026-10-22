@@ -8,6 +8,44 @@
 SPMI/key patch 0097 is prepared and locally validated; hardware test pending.
 This paragraph and the next section override stale device/status claims below.**
 
+### Corrected touchscreen facts (Codex, confirmed in live recovery)
+
+**The actual panel is GOODIX BerlinD / CSOT, NOT FocalTech.** Older input-port
+notes below inferred a chip from a shared DT compatible and are superseded.
+The vendor's "virtual" input parent and beef/dead IDs do NOT imply a fake
+sensor. The recovery's real Goodix driver registers that input device.
+
+- recovery-touch-dmesg.txt: gpio_det=1/gpio_det1=0, "TP is goodix, panel is
+  CSOT", BerlinD SPI probe, successful stage2 init/IRQ, live finger reports;
+  FocalTech prints "TP is not focal!". External firmware/config files are
+  missing in recovery, yet IC firmware is present and touch events work.
+- spi1.0 driver xiaomi,peridot-spi, actual DT parent **SPI@0xa90000 (SE4)**,
+  not the disabled SE1 alternative @0xa84000. IRQ/reset TLMM129/128.
+  SPI pins16..19, function1 qup0_se4_l0..3, 6mA drive. TLMM physical base
+  0xf000000 plus register bank0x100000 + pin*0x1000 (pinctrl-cliffs.c).
+- goodix-chip-info.txt: rom BERLIN, patch9916R, patch VID05800617,
+  config669e106b/version25. goodix-input-caps.txt: raw X0..19520,
+  Y0..43392 (=1220*16,2712*16), 10 fingers.
+- Live read-only Goodix sysfs reg_rw reads firmware@0x10014 and IC_INFO@0x10070.
+  Sysfs output truncates at64bytes, so 197-byte IC_INFO was read in4chunks.
+  Checksum passes; misc offset53, touch_data_addr=0x10308, header8, point8.
+  Files goodix-live-registers.txt, goodix-ic-info.bin, goodix-layout.txt.
+- Primary references downloaded: Linux v6.12 goodix_berlin_core.c/spi.c,
+  which explicitly support revision D with existing firmware/config; official
+  goodix/goodix_ts_berlin source in goodix-reference/. Protocol F1 + BE32 addr
+  +3 dummy bytes then data; writes F0+BE32 addr+data. First native probe will
+  read version/IC_INFO only, without firmware flashing or reset.
+- Actual GCC compatible is **qcom,cliffs-gcc**, not sm8650. MiCode peridot-u-oss
+  drivers/clk/qcom/gcc-cliffs.c downloaded to linux-ref/ (blob786e3f16...).
+  SE4 RCG0x183c8, CBCR0x183bc; vote0x52008 bit26, wrapper AHB bits20/21,
+  CBCR0x23000/0x23004. RCG DFS currently enabled (CMD_DFSR=0x2d).
+- GENI SPI Linux DOES implement FIFO mode; the earlier "DMA-only" claim was
+  incorrect. linux-ref/spi-geni-qcom.c and qcom-geni-se.c contain packing,
+  FIFO tx/rx and SPI command setup. No need to add an SMMU for the first probe.
+- SweetHIDTouch still hardcodes physical1080x2400; future touch delivery must
+  use F6 physical1220x2712 and signed centering offsets matching framebuffer
+  logical1125x2436. Merely feeding old touch_focaltech() would be incorrect.
+
 ### 0097 native peridot keys — current work
 
 - Reviewed OpenCode continuation through commit c547fb7. Its final CI
@@ -36,7 +74,8 @@ This paragraph and the next section override stale device/status claims below.**
   match passed. Harness extracting actual selector/read/debounce code passes
   ASan/UBSan: owner preference, PPID, APIDs895/1023, bounds, timeout/denied
   channels, read-only command, bounce and failure release.
-- Next: CI0097, verify patch application/artifact SHA, build with MAC-fixed ADT
+- CI0097 **39757457451 succeeded**, commit79d3507. Downloading/verifying
+  artifact, then build with MAC-fixed ADT
   + safe shim, use peridot-cycle.py with sweetdiagreset=180 sweetpanicreset=1.
   Compare PMIC values to recovery and ask user for separate short presses of
   power/volume up/volume down. No new image booted yet.
