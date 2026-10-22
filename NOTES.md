@@ -218,6 +218,30 @@
   `qcom,pmxr2230@1`, reg=<1 0>), RT 0x8d10. Do not infer SID7 from a random
   debug-regmap read.
 
+### Continuation 2026-10-22 (after the Codex handoff): touch input port
+
+- The verified stable image `shim/out/shim-boot-0092-stable.img` was reloaded
+  temporarily with `fastboot boot` (boot partitions untouched). Boot reason is
+  "bootloader", so the phone needs power + volume-down to get back to fastboot;
+  after a `fastboot reboot recovery` the usual adb-in-recovery flow works.
+- **The FocalTech protocol is already implemented**: `bsd/dev/sweet_touch.c` has
+  `touch_focaltech()` (read 63 bytes at register 0x38, 6 bytes per point,
+  12-bit coordinates) and `touch_report()` -> `sweet_hid_touch()`. The old
+  transport is **SE7 I2C** (`touch_msg_run()` via the SE7 wrapper), which does
+  not exist on this phone. The peridot panel uses **FT3683G on SPI**
+  (`focaltech,n16t-3683g-spi`, SPI slave 0, 15 MHz, PMI GPIO 0x81 = IRQ,
+  0x80 = reset, avdd/vdd = DT regulators 0x34f/0x358, raw panel 19520x43424
+  -> logical 1125x2436).
+- So the remaining work is a **QUP v3 SPI master** (Linux reference
+  `drivers/spi/spi-geni-qcom.c`, downloaded to /tmp/opencode/linsrc/) plus
+  switching the FocalTech transport to it. `sweet_rpmh.c` already provides
+  `sweet_rpmh_vreg_enable()` for the rails, and `sweet_touch.c` already knows
+  the TLMM/GCC mapping style.
+- The Android module that works on this phone is `focaltech_touch.ko`
+  ("fts" family: fts_ts_probe, fts_irq_handler, fts_get_ic_information) in
+  /tmp/opencode/ufsref/koall/modules/ - useful as a cross-check of the
+  register/command sequence, but the mainline fts.c is not in v6.1.
+
 ### Current completion and next port work
 
 1. Kernel panic investigation / safe disk diagnostics / super geometry repair /
