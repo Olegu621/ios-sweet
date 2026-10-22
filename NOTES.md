@@ -84,7 +84,8 @@
   also handle the F6's larger physical panel. Do not use SM7150 key/touch/USB
   MMIO on SM8635: the root compatible string gates those old probes. Both C/C++
   files compile locally. Image `shim/out/shim-boot-0091-ui.img` was temporarily
-  booted with sweetfb_noconsole=1, awaiting user screen observation / next log.
+  booted with sweetfb_noconsole=1. User observes the **Apple logo** (first GUI
+  rendering succeeds), but no home screen yet. Next phone log is being pulled.
 - Patch **0092**, commit **d82bfc9**: early trace/panic text also enters the main
   ring; try-lock + polled, bounded UFS flush before normal panic debugger path.
   Optional sweetpanicreset=1 resets after capture; sweetdiagreset=N (30..3600 s)
@@ -112,8 +113,9 @@
   unrelated; these probes cannot be enabled on peridot unchanged.
 - Power/resin are PMK8550 SID0 PON_HLOS at 0x1300, RT status 0x1310, bits7/6
   (Linux pmk8350 gen3 keys), not old 0x0810 bits0/1. Recovery idle RT read 0x10.
-  Volume-up is PMXR2230 GPIO6: its controller at 0x8800, SID2 (resolve the parent
-  from live.dts), RT 0x8d10. Do not infer SID7 from a random debug-regmap read.
+  Volume-up is PMXR2230 GPIO6: controller at 0x8800, **SID1** (live parent
+  `qcom,pmxr2230@1`, reg=<1 0>), RT 0x8d10. Do not infer SID7 from a random
+  debug-regmap read.
 
 ### Immediate next actions
 
