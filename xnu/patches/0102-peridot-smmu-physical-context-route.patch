@@ -1,0 +1,141 @@
+--- a/bsd/dev/sweet_gpi_peridot.c
++++ b/bsd/dev/sweet_gpi_peridot.c
+@@ -60,44 +60,80 @@
+ 	return pg_base + (ch < 2 ? ch * 0x80 : 0x1000);
+ }
+ 
+-/* Leave global translation and all existing mappings intact. If the ring/data SID is
+- * unmatched/faulting, install one exact-ID bypass in an unused SMR before
+- * issuing any DMA. Only this kernel driver can submit GPI descriptors. */
++/* Some Qualcomm firmware substitutes BYPASS with FAULT (Linux
++ * qcom_smmu_write_s2cr). Reuse only an already referenced, disabled S1
++ * context with stage2 bypass; never write SCTLR/CBAR or change a live bank. */
++static bool
++pg_cb_physical(vm_offset_t smmu, uint32_t id1, unsigned cb)
++{
++	unsigned shift = (id1 & 0x80000000u) ? 16 : 12;
++	unsigned pages = 1u << (((id1 >> 28) & 7) + 1);
++	uint64_t base = (uint64_t)pages << shift;
++	if (cb >= (id1 & 0xff) || base + ((uint64_t)(cb + 1) << shift) > 0x100000) {
++		return false;
++	}
++	uint32_t cbar = pg_rd(smmu, (1u << shift) + 4 * cb);
++	uint32_t sctlr = pg_rd(smmu, (unsigned)(base + ((uint64_t)cb << shift)));
++	bool ok = ((cbar >> 16) & 3) == 1 && !(sctlr & 1) && sctlr != 0xffffffffu;
++	printf("PERIDOT GPI: CB%u CBAR=%#x SCTLR=%#x existing physical=%d\n", cb, cbar, sctlr, ok);
++	return ok;
++}
++
++static bool
++pg_s2cr_physical(vm_offset_t smmu, uint32_t id1, uint32_t s2cr)
++{
++	unsigned type = (s2cr >> 16) & 3;
++	return type == 1 || (type == 0 && pg_cb_physical(smmu, id1, s2cr & 0xff));
++}
++
++static int
++pg_boot_bypass_cb(vm_offset_t smmu, uint32_t cr0, uint32_t id1, unsigned count)
++{
++	for (unsigned i = 0; i < count; ++i) {
++		uint32_t smr = pg_rd(smmu, 0x800 + 4 * i), co = pg_rd(smmu, 0xc00 + 4 * i);
++		bool valid = (cr0 & 8) ? (co & 0x400) != 0 : (smr & 0x80000000u) != 0;
++		if (valid && ((co >> 16) & 3) == 0 && pg_cb_physical(smmu, id1, co & 0xff)) {
++			printf("PERIDOT GPI: reuse boot physical CB%u referenced by SMR%u SID=%#x\n",
++			    co & 0xff, i, smr & 0xffff);
++			return co & 0xff;
++		}
++	}
++	return -1;
++}
++
+ static bool
+ pg_smmu_ready(unsigned sid)
+ {
+-	vm_offset_t smmu = ml_io_map(0x15000000, 0x1000);
++	vm_offset_t smmu = ml_io_map(0x15000000, 0x100000);
+ 	if (!smmu || (sid != 0xb6 && sid != 0xa3)) {
+ 		return false;
+ 	}
+-	uint32_t cr0 = pg_rd(smmu, 0), id0 = pg_rd(smmu, 0x20);
++	uint32_t cr0 = pg_rd(smmu, 0), id0 = pg_rd(smmu, 0x20), id1 = pg_rd(smmu, 0x24);
+ 	unsigned count = id0 & 0xff, matches = 0, free_slot = 0xffff;
+-	bool bypass = false;
++	bool physical = false;
+ 	if (!(id0 & (1u << 27)) || !count || id0 == 0xffffffffu || (cr0 & 1)) {
+ 		printf("PERIDOT GPI: unsupported/disconnected SMMU CR0=%#x ID0=%#x\n", cr0, id0);
+ 		return false;
+ 	}
+ 	for (unsigned i = 0; i < count; ++i) {
+-		uint32_t smr = pg_rd(smmu, 0x800 + 4 * i), s2cr = pg_rd(smmu, 0xc00 + 4 * i);
++		uint32_t smr = pg_rd(smmu, 0x800 + 4 * i), co = pg_rd(smmu, 0xc00 + 4 * i);
+ 		bool exid = (cr0 & 8) != 0;
+-		bool valid = exid ? (s2cr & 0x400) != 0 : (smr & 0x80000000u) != 0;
++		bool valid = exid ? (co & 0x400) != 0 : (smr & 0x80000000u) != 0;
+ 		unsigned mask = (smr >> 16) & (exid ? 0xffff : 0x7fff);
+-		if (!valid && free_slot == 0xffff) {
++		if (!valid && co != 0xffffffffu && free_slot == 0xffff) {
+ 			free_slot = i;
+ 		}
+ 		if (valid && ((sid & ~mask) == ((smr & 0xffff) & ~mask))) {
+ 			++matches;
+-			bypass = ((s2cr >> 16) & 3) == 1;
+-			printf("PERIDOT GPI: SID%#x slot%u SMR=%#x S2CR=%#x\n", sid, i, smr, s2cr);
+-		}
+-	}
+-	bool ok = matches == 1 ? bypass : matches == 0 && !(cr0 & (1u << 10));
+-	printf("PERIDOT GPI: SMMU SID%#x existing physical bypass=%d matches=%u CR0=%#x\n", sid, ok, matches, cr0);
++			physical = pg_s2cr_physical(smmu, id1, co);
++			printf("PERIDOT GPI: SID%#x slot%u SMR=%#x S2CR=%#x physical=%d\n", sid, i, smr, co, physical);
++		}
++	}
++	bool ok = matches == 1 ? physical : matches == 0 && !(cr0 & (1u << 10));
++	printf("PERIDOT GPI: SMMU SID%#x existing physical=%d matches=%u CR0=%#x\n", sid, ok, matches, cr0);
+ 	if (ok) {
+ 		return true;
+ 	}
+-	/* Hardware0100: CR0=2b0406,110SMRs, no SIDb6 match, first free5. Data uses wrapper SIDa3.
+-	 * Never replace a live mapping or use the extended-ID encoding blindly. */
+ 	if (matches || free_slot == 0xffff || (cr0 & 8)) {
+ 		return false;
+ 	}
+@@ -106,16 +142,31 @@
+ 	if (oldsmr & 0x80000000u) {
+ 		return false;
+ 	}
+-	pg_wr(smmu, co, 1u << 16); /* exact stream physical bypass */
++	pg_wr(smmu, co, 1u << 16);
+ 	pg_wr(smmu, so, 0x80000000u | sid);
+-	if (pg_rd(smmu, so) != (0x80000000u | sid) || pg_rd(smmu, co) != (1u << 16)) {
+-		pg_wr(smmu, so, oldsmr);
+-		pg_wr(smmu, co, olds2cr);
+-		printf("PERIDOT GPI: SID mapping readback failed; DMA withheld\n");
+-		return false;
+-	}
+-	printf("PERIDOT GPI: SID%#x exact physical bypass in free slot%u; all other entries unchanged\n", sid, free_slot);
+-	return true;
++	uint32_t got_smr = pg_rd(smmu, so), got_s2cr = pg_rd(smmu, co);
++	printf("PERIDOT GPI: SID%#x slot%u map readback SMR=%#x S2CR=%#x old=%#x/%#x\n",
++	    sid, free_slot, got_smr, got_s2cr, oldsmr, olds2cr);
++	if (got_smr == (0x80000000u | sid)) {
++		if (!pg_s2cr_physical(smmu, id1, got_s2cr)) {
++			int cb = pg_boot_bypass_cb(smmu, cr0, id1, count);
++			if (cb >= 0) {
++				/* TRANS to an already disabled S1/stage2-bypass bank,
++				 * following the documented Qualcomm S2CR quirk. */
++				pg_wr(smmu, co, (unsigned)cb);
++				got_s2cr = pg_rd(smmu, co);
++				printf("PERIDOT GPI: SID%#x CB%u route readback S2CR=%#x\n", sid, cb, got_s2cr);
++			}
++		}
++		if (pg_rd(smmu, so) == (0x80000000u | sid) && pg_s2cr_physical(smmu, id1, got_s2cr)) {
++			printf("PERIDOT GPI: SID%#x exact physical route in free slot%u; no CB/global changes\n", sid, free_slot);
++			return true;
++		}
++	}
++	pg_wr(smmu, so, oldsmr);
++	pg_wr(smmu, co, olds2cr);
++	printf("PERIDOT GPI: SID%#x no verified physical route; DMA withheld\n", sid);
++	return false;
+ }
+ 
+ static bool

@@ -217,6 +217,55 @@ sensor. The recovery's real Goodix driver registers that input device.
   Physical finger test unavailable. Touch candidate and HID geometry remain
   ignored/uncommitted until transport/Goodix initialization is verified.
 
+### 0101 first hardware / 0102 scoped SMMU routing
+
+- Latest0101 CI **39769262911 succeeded**, commit708e39e (both SIDs).
+  Artifact SHA256SUMS passed; CI tree exactly matches GPI source, SPI
+  baseline spi.pre0102.c and conf-files.pre0102. Built current safe shim
+  +MAC ADT, image shim-boot-0101-gpi.img SHA
+  cf461300cf892699da28fce24d46da00df08178b99e648d81f64d261678b1d2e.
+- cycle-0101-gpi: no panic, automatic recovery returned. Initial SIDb6
+  BYPASS mapping readback FAILED; guard withheld ALL DMA before allocation/
+  channel control. Actual mismatch values were not logged by0101, so its
+  precise cause is still unknown. This is NOT a DMA transport success.
+- Primary exact peridot arm-smmu-qcom.c and upstream6.12 document firmware
+  replacing BYPASS writes with FAULT; may explain result, not proven yet.
+  Standard workaround uses S2CR TRANS into disabled S1/stage2-bypass CB.
+ 0102 logs actual old/readback SMR/S2CR and validates physical semantics
+  (BYPASS ignores irrelevant CB index/attribute bits), rather than whole
+  S2CR equality. If necessary, reuses ONLY an existing referenced CB with
+  SCTLR.M=0 and CBAR.type1. Never writes SCTLR/CBAR, never disables live
+  contexts/global SMMU. Existing target live translation still refused.
+- Context geometry from exact vendor arm-smmu.c/header: ID1=60000047,
+  pgshift12, numpages128, CB base0x80000,71banks, full DT map1MiB.
+  Read only referenced banks and check computed offsets within that map.
+-0102 source local compile passed. Actual-functions ASan/UBSan tests cover
+  Qualcomm BYPASS->FAULT emulation, existing disabled-CB reuse WITHOUT any
+  CB writes, refusal of enabled/stage2 contexts, irrelevant attribute bits,
+  both ring/data streams and all earlier slot/global preservation cases.
+- Next CI0102 then temporary peridotspi=4/diag45 capture; inspect exact
+  readback, context proof and GPI initialization/loopback. Hardware pending.
+
+### Deferred power candidate (NOT committed or booted)
+
+- research/.../0102-peridot-touch-power-candidate.patch is an IGNORED old
+  filename; do NOT confuse with tracked0102 SMMU patch. It will get a later
+  number after DMA transport passes. Its edits are currently in local
+  buildtree SPI and conf/files, plus new sweet_rpmh_peridot.c; these are NOT
+  what0102 CI builds. GPI file is current0102, other bases saved separately.
+- Exact peridot RPMh v3 offsets, APPS DRV2@17a20000, TCS@17a20d00,
+  stride2a0/command18, ACTIVE TCS3/4 from live DT order WAKE3/ACTIVE2/SLEEP2/
+  FAST1; reserved cmd-db81c60000/20000. Strict only ldob13/3300mV/42000
+  and ldob23/1800mV/42800, rawmode7 enable1, bounded ACK/status/readback,
+  preserve IRQ/other TCS, quarantine on uncertainty. No direct SPMI writes.
+- GPIO128 reset low6mA, AVDD vote,3ms, IOVDD vote,15ms, GPIO129 input/bias
+  disabled, reset high,200ms. Optional peridotpower=1 only AFTER GPI loopback
+  passes. No firmware/config flashing. Normal probe remains without power.
+- Local two-file compile and actual-functions ASan/UBSan RPMh/sequence tests
+  passed: whitelist/DT addresses, malformed cmd-db, ACTIVE3/4-only writes,
+  stride24/ACK/IRQ preservation, busy refusal, timeout/stale/readback poison,
+  reset low until settled votes, only GPIO128/129, failure withholding.
+
 ### Prepared follow-up (touch candidate (deferred, to rebase after FIFO fix), NOT YET committed or booted)
 
 - research/diagnostics-20261022/0099-peridot-goodix-touch-candidate.patch;
