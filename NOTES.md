@@ -376,6 +376,33 @@ The SPMI arbiter windows on this phone (from the live DT):
 ownership `cnfg + 4*apid`, bus count `core + 4` bits[10:0] (all recorded in
 the previous handoff).
 
+#### SPMI QMI encoding: search finished, negative result
+
+Searched for `qcom-spmi.c` / `spmi.c` (the only file with the SPMI command
+encoding) in: torvalds v4.14/v4.19/v5.4/v5.15/v6.1 (it is not in mainline at
+all - mainline only has the `regmap-spmi` wrapper), kernel/common
+android12-5.10 / android13-6.1 / android14-6.1, MiCode/Xiaomi_Kernel_OpenSource
+`peridot-u-oss` (no SPMI driver), LineageOS qcom_sm8750/sm8550 and
+android_kernel_xiaomi_sm8550 trees (QCOM-only file, GitHub contents API
+truncates drivers/spi at 1000 entries so only direct raw URLs work),
+git.linaro.org, grep.app and searchcode (both unusable/blocked).
+
+The recovery image was pulled (`recovery_a.img`, 100 MiB) and unpacked: the
+first LZ4 section at 0x1000 is the **ramdisk** (userspace strings, no kernel
+symbols); the second LZ4 candidate at 0x19fa155 does not inflate, and the
+kernel's `Linux version` string was not found in the raw image, so the
+kernel part of the ABL recovery image is not plain LZ4 and was not extracted.
+
+=> The QMI command encoding still has to come either from a Qualcomm vendor
+tree that keeps `drivers/spi/qcom-spmi.c`, or from the running recovery
+kernel's own text (kallsyms table of the extracted Image - the extraction
+step is the remaining unknown).
+
+**Meanwhile the iOS system is back on the phone**: the verified
+`shim/out/shim-boot-0092-stable.img` was booted temporarily again with
+`fastboot boot` (10:05, boot partitions untouched). The phone is in iOS with
+the lock screen; to get back to fastboot use power + volume-down.
+
 ### Current completion and next port work
 
 1. Kernel panic investigation / safe disk diagnostics / super geometry repair /
