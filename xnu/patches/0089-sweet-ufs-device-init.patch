@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index b8e580f..5051f44 100644
+index b8e580f..babf637 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -59,10 +59,16 @@ extern void sweet_usb_probe(void);
@@ -23,7 +23,31 @@ index b8e580f..5051f44 100644
  #define REG_UTRLBA      0x50
  #define REG_UTRLBAU     0x54
  #define REG_UTRLDBR     0x58
-@@ -374,22 +380,25 @@ ufs_find_partition(const char *want)
+@@ -257,11 +263,18 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+ 		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
+-		printf("SWEET UFS: upiu %02x %02x %02x %02x %02x %02x %02x %02x sense %02x %02x %02x %02x %02x %02x %02x %02x\n",
+-		    ucd->resp[0], ucd->resp[1], ucd->resp[2], ucd->resp[3],
+-		    ucd->resp[4], ucd->resp[5], ucd->resp[6], ucd->resp[7],
+-		    ucd->resp[8], ucd->resp[9], ucd->resp[10], ucd->resp[11],
+-		    ucd->resp[12], ucd->resp[13], ucd->resp[14], ucd->resp[15]);
++		/*
++		 * The sense data of a UFS 4.0 response sits behind the 12 byte
++		 * UPIU header, the residual count and four reserved dwords: its
++		 * length is a u16 at offset 32 and the 18 sense bytes follow.
++		 */
++		printf("SWEET UFS: sense len %u data %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
++		    (unsigned)((ucd->resp[32] << 8) | ucd->resp[33]),
++		    ucd->resp[34], ucd->resp[35], ucd->resp[36], ucd->resp[37],
++		    ucd->resp[38], ucd->resp[39], ucd->resp[40], ucd->resp[41],
++		    ucd->resp[42], ucd->resp[43], ucd->resp[44], ucd->resp[45],
++		    ucd->resp[46], ucd->resp[47], ucd->resp[48], ucd->resp[49],
++		    ucd->resp[50], ucd->resp[51]);
+ 		printf("SWEET UFS: cdb %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x utrd %08x %08x %08x\n",
+ 		    ucd->cmd[16], ucd->cmd[17], ucd->cmd[18], ucd->cmd[19],
+ 		    ucd->cmd[20], ucd->cmd[21], ucd->cmd[22], ucd->cmd[23],
+@@ -374,22 +387,25 @@ ufs_find_partition(const char *want)
   * Returns the full UICCMDARG0 or 0xffffffff on timeout.
   */
  static uint32_t
@@ -55,7 +79,7 @@ index b8e580f..5051f44 100644
  		}
  		delay(1);
  	}
-@@ -398,6 +407,33 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
+@@ -398,6 +414,33 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
  	return 0xffffffffu;
  }
  
@@ -89,7 +113,7 @@ index b8e580f..5051f44 100644
  /*
   * The SCSI path through the UTR list is the only judge of a healthy device:
   * any TEST UNIT READY answer (GOOD, or a refusing CHECK CONDITION) proves the
-@@ -416,7 +452,7 @@ ufs_link_init(void)
+@@ -416,7 +459,7 @@ ufs_link_init(void)
  	}
  	printf("SWEET UFS: SCSI unreachable, UIC link init (IS 0x%x IE 0x%x HCS 0x%x)\n",
  	    ufs_rd(REG_IS), ufs_rd(REG_IE), ufs_rd(REG_HCS));
@@ -98,7 +122,7 @@ index b8e580f..5051f44 100644
  	printf("SWEET UFS: DME RESET result 0x%x IS 0x%x\n", r, ufs_rd(REG_IS));
  	if (r != 0xffffffffu) {
  		uint32_t hcs = 0;
-@@ -429,11 +465,165 @@ ufs_link_init(void)
+@@ -429,11 +472,165 @@ ufs_link_init(void)
  		}
  		printf("SWEET UFS: HCS after DME RESET 0x%x\n", hcs);
  	}
@@ -265,7 +289,7 @@ index b8e580f..5051f44 100644
  static int
  ufs_take_over_host(void)
  {
-@@ -704,6 +894,11 @@ sweet_ufs_init(void)
+@@ -704,6 +901,11 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
