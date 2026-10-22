@@ -2,6 +2,97 @@
 
 ## >>> THIS CLONE IS THE PERIDOT PORT (POCO F6 / SM8635) — sweet notes below are HISTORY/REFERENCE (project paused ~2026-10-18) <<<
 
+## Agent handoff (peridot, 2026-10-22, 06:00)
+
+**STATUS: the phone needs a physical power cycle (USB gadget wedged, it came up in
+Android). Everything else is prepared: the next action is one power cycle, then a
+shim run whose log is read back over adb.**
+
+### What happened this session
+1. Built a **raw SCSI tool for the recovery** (`/tmp/opencode/ufsref/sgio.c`,
+   freestanding aarch64, `SG_IO` ioctl): `sgio <sgdev> <cdb-hex> [in|out] [len]`.
+   It works in the recovery and prints status/sense/data. This proves the *device*
+   is healthy in the recovery (TUR on LUN 0 -> GOOD, READ CAPACITY -> 481 GiB).
+2. Read the **device descriptor of the UFS 4.0 device** through the recovery's
+   sysfs (`/sys/bus/platform/devices/1d84000.ufshc/device_descriptor/`):
+   `specification_version = 0x0400` (UFS 4.0), **`initial_power_mode = 0x01`**
+   (the device comes up in Sleep power mode), `number_of_luns = 6`,
+   `number_of_wluns = 4`, `ufs_features = 0x33`. The reference driver ends up in
+   `[Rx,Tx]: Gear[5,5], Lane[2,2], PWR[FAST MODE,FAST MODE], Rate-B`
+   (`qcom/power_mode`).
+3. Fetched the **AOSP android14-6.1 UFS driver** (kernel/common 0c3d559bcd85) to
+   /tmp/opencode: `aosp-ufshcd.c`, `aosp-ufs.h`, `aosp-ufshcd.h`, `aosp-unipro.h`.
+   Facts: UIC block at **0x90/0x94/0x98/0x9c** (0x10 is CONTROLLER_PID, read only -
+   that was the bug in patch 0087), result code in **ARG_2**, DME GET value in
+   **ARG_3**, DME SET = UIC 0x02 with arg1 = MIB<<16 and arg3 = value,
+   PA_PWRMODE = 0x1571, value (rx<<4)|tx, FAST = 0x11, PA_HSSERIES = 0x156a = 2,
+   PA_RXGEAR 0x1583, PA_ACTIVERXDATALANES 0x1580, PA_RXTERMINATION 0x1584,
+   PA_TXGEAR 0x1568, PA_ACTIVETXDATALANES 0x1560, PA_TXTERMINATION 0x1569,
+   PA_MAXRXHSGEAR 0x1587, PA_CONNECTEDRXDATALANES 0x1581, and the QUERY request
+   payload **starts at UPIU offset 12** (struct utp_upiu_query), not 16.
+   The fDeviceInit handshake (QUERY SET_FLAG idn 1, then poll READ_FLAG) and the
+   power mode change are in `ufshcd_complete_dev_init()` / `ufshcd_dme_change_power_mode()`.
+4. **Built a hand crafted kernel module for the recovery** (to drive the UFS from
+   inside the running kernel and read the result from dmesg):
+   /tmp/opencode/ufsref/{mkmod.sh,graft.py,btf.py,patchcrc.py}. The vermagic and
+   the symbol CRCs come from the device's own vendor modules (/tmp/vendor/lib/modules),
+   the `struct module` layout from the kernel's own BTF (/sys/kernel/btf/vmlinux).
+   The loader still crashes the kernel (instant reboot) - the crash is in the
+   module loader, not in our code (a vendor skeleton with our code also dies);
+   the kernel has CONFIG_ARM64_PTR_AUTH_KERNEL, CONFIG_SHADOW_CALL_STACK and
+   CONFIG_CFI_CLANG, and the module is not built with CFI. Not worth more time:
+   the shim log channel below replaces it.
+5. **The shim now has a log channel**: the shim runs the UFS experiment, writes the
+   log (and the full sense data) into the **last 4 blocks of the cache partition**
+   (sda29, LBA 208895 = device LBA, partition block 32767) and then does a PSCI
+   system reset - the phone comes back in the recovery (the "recovery" boot reason
+   is still in the PMIC), and the log is read with
+   `adb shell 'dd if=/dev/block/sda29 bs=4096 skip=32764 count=4'`.
+   The log works: a first run was read successfully.
+6. **Findings from that log** (shim, 16.07.2026):
+   - the DME GETs work: lanes 2/2, max HS gear 5, **PA_PWRMODE = 0x11 already**
+     (so the device is *not* in Sleep power mode - that theory is dead),
+   - the NOP OUT UPIU is answered (NOP IN, ocs 0) - the UniPro link is alive,
+   - the QUERY request is answered (UPIU type 0x36) but the response byte is
+     0xff ("not supported") - the fDeviceInit query is refused as sent,
+   - a SCSI command (TEST UNIT READY) is answered with CHECK CONDITION
+     (status 0x02) and an empty sense: resp[6]=1 (failure), resp[7]=2,
+     sense "70 00 02 00 00 00 00 0a ..." (NO SENSE, ASC 0x02 = not ready).
+   => The device is alive and answers device-management commands but refuses
+   *SCSI* commands. The next log (from the run with the full sense dump) will show
+   the complete 18 byte sense data, which is the key diagnostic.
+
+### Ready to use artefacts
+- `xnu/kernel-0089peridot` = CI 39713483351 (success) = patches up to 0089
+  (0089 = correct UIC offsets + fDeviceInit QUERY + PA_PWRMODE change).
+- `shim/out/payload-0053p.bin` + `shim/out/shim-boot-0053p.img` = that kernel with
+  peridot-high.adt and the 0052p cmdline.
+- `shim/out/shim-boot.img` = the diagnostic shim (no payload): runs the UFS
+  candidates, writes the log into the cache partition, resets into the recovery.
+  NOTE: the log buffer was 16 KiB but the shim's `data` buffer was 8 KiB - the
+  overflow hung the phone (fixed now: `data[4 * BLOCK]`).
+
+### Next actions (in order)
+1. **Power cycle the phone** (hold the power button ~10 s). It is in Android with a
+   wedged USB gadget; the iOS rootfs in `userdata` was most likely reformatted by
+   Android. Re-flash it: `fastboot flash userdata research/ipsw-x/ios16-root-20H392-peridot-v1.simg`
+   (or the .img - the .simg is what was flashed, md5 c9b80713c76a2b066025f6b3369e1a44).
+2. `adb reboot bootloader` -> fastboot -> `fastboot reboot recovery` -> recovery.
+3. Read the shim log of the last (crashed) run - it has the **full sense data**:
+   `adb shell 'dd if=/dev/block/sda29 bs=4096 skip=32764 count=4' > /tmp/log.bin`
+4. Re-run the diagnostic shim with the fixed buffer and read its log:
+   `fastboot boot shim/out/shim-boot.img`, wait ~40 s, then read the log again.
+5. Port whatever the log points at into `bsd/dev/sweet_ufs.c` (patch 0090) and boot
+   `shim/out/shim-boot-0053p.img`.
+
+### What is NOT the problem (ruled out)
+- The UFS device itself is healthy (the recovery's driver reads and writes it, and
+  the shim's DME GETs and NOP OUT work).
+- The UIC register offsets (0087 used the 1.x layout 0x10/0x14/0x18/0x1c, which is
+  why 0051p timed out; 0089 fixes them to 0x90/0x94/0x98/0x9c).
+- The device's power mode (PA_PWRMODE is already 0x11 = FAST).
+- The link: NOP OUT and QUERY are answered.
+
 ## Agent handoff (peridot, 2026-10-21)
 
 **Goal:** boot real iOS 16.7.16 (iPhone X userland, D22AP) on POCO F6 "peridot" (SM8635,

@@ -371,7 +371,16 @@ static int ufs_recover_link(void)
  * The answer arrives in the QUERY response UPIU (type 0x36); its value
  * field sits at offset 20 (12 byte header + 8).
  */
+static uint32_t query_len(uint8_t opcode, uint8_t idn, uint32_t len,
+			  uint32_t value, uint32_t *rsp_value);
+
 static uint32_t query(uint8_t opcode, uint8_t idn, uint32_t value, uint32_t *rsp_value)
+{
+	return query_len(opcode, idn, 0, value, rsp_value);
+}
+
+static uint32_t query_len(uint8_t opcode, uint8_t idn, uint32_t len,
+			  uint32_t value, uint32_t *rsp_value)
 {
 	static uint8_t tag;
 	static int qlog;
@@ -396,8 +405,8 @@ static uint32_t query(uint8_t opcode, uint8_t idn, uint32_t value, uint32_t *rsp
 	ucd.cmd[13] = idn;
 	ucd.cmd[14] = 0;			/* index */
 	ucd.cmd[15] = 0;			/* selector */
-	ucd.cmd[18] = 0;			/* length */
-	ucd.cmd[19] = 0;
+	ucd.cmd[18] = len >> 8;		/* length */
+	ucd.cmd[19] = len;
 	ucd.cmd[20] = value >> 24;
 	ucd.cmd[21] = value >> 16;
 	ucd.cmd[22] = value >> 8;
@@ -485,14 +494,19 @@ static uint32_t nop_out(void)
  * A QUERY READ_DESC of the device descriptor (idn 0).  The descriptor
  * follows the query answer in the response UPIU.
  */
-static uint32_t read_device_descriptor(void)
+static uint32_t read_descriptor(uint8_t idn, uint32_t len)
 {
 	uint32_t v = 0, r;
 
-	r = query(0x01, 0x00, 0, &v);		/* READ_DESC, idn 0 (device) */
+	r = query_len(0x01, idn, len, 0, &v);	/* READ_DESC */
 	log_num("read_desc_rc", r);
-	con_hex2("UFS DESC", "type=", ucd.resp[0], "code=", ucd.resp[6]);
-	con_hex2("UFS DESC", "d0_3=", be32(ucd.resp + 32), "d4_7=", be32(ucd.resp + 36));
+	log_num("desc_len", be32(ucd.resp + 8) & 0xffff);
+	log_num("desc_d0_3", be32(ucd.resp + 32));
+	log_num("desc_d4_7", be32(ucd.resp + 36));
+	log_num("desc_d8_b", be32(ucd.resp + 40));
+	log_num("desc_dc_f", be32(ucd.resp + 44));
+	log_num("desc_d10", be16(ucd.resp + 48));
+	log_num("desc_d12", be16(ucd.resp + 50));
 	return r;
 }
 
@@ -592,7 +606,8 @@ static void ufs_power_mode_experiment(void)
 	 * then the power mode change. */
 	nop_out();
 	fdeviceinit_handshake();
-	read_device_descriptor();
+	read_descriptor(0x00, 0x40);	/* the device descriptor */
+	read_descriptor(0x01, 0x20);	/* the configuration descriptor */
 	dme_set(PA_RXGEAR, gear_rx);
 	dme_set(PA_ACTIVERXDATALANES, lanes_rx);
 	dme_set(PA_RXTERMINATION, 1);
