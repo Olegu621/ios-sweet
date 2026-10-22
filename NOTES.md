@@ -119,9 +119,17 @@
   sampled only SpringBoard/backboardd, so they identify the waiting client but
   not the server's blocking operation. Also sample containermanagerd and
   mobileactivationd if space permits. Do not patch LaunchServices blindly.
-- 0092 CI **39728179094** in progress. Phone is back in recovery after the user
-  physically entered fastboot and the host read the 0091 disk log. Ready for
-  the controlled-panic capture/reset test as soon as the artifact is ready.
+- 0092 CI **39728179094 succeeded**; downloaded artifact SHA256SUMS verified.
+  **Hardware controlled-panic test PASSED**: temporary image
+  `shim/out/shim-boot-0092-probe.img` with sweetpanicprobe=1 sweetpanicreset=1
+  automatically returned to recovery. `cycle-0092-probe/console.txt` contains
+  `SWEET EARLY PANIC: SWEET DIAG: controlled panic after UFS init @sweet_ufs.c:1105`;
+  disk header flush seq UINT64_MAX, 8410 console bytes. Both emergency UFS flush
+  and PSCI/BCB automatic recovery return are proven on this phone.
+- Now running `shim/out/shim-boot-0092-sample.img` through peridot-cycle.py:
+  sweetdiagreset=150 sweetpanicreset=1; sample SpringBoard,backboardd,lsd,
+  containermanagerd,mobileactivationd. Output `cycle-0092-sample/`.
+  Phone needs no manual intervention while this automatic diagnostic runs.
 
 ### Peripheral facts gathered read-only in recovery
 
@@ -143,9 +151,9 @@
 
 ### Immediate next actions
 
-1. Finish 0092 CI. First run controlled panic with sweetpanicprobe=1
-   sweetpanicreset=1 through tools/peridot-cycle.py; require its panic string in
-   the pulled log. Then run a 150-second unattended UI diagnostic boot.
+1. 0092 CI and hardware panic capture/reset test DONE. Collect the running
+   150-second unattended UI diagnostic, symbolicate lsd server threads, then
+   fix the observed server-side block. No unexplained kernel panic in 0090/0091.
 2. Geometry repair DONE and readback verified. BCB command was temporarily set
    to `boot-recovery` (32 bytes, backup saved) so the safe shim PSCI reset should
    return to recovery automatically. Safe shim boot accepted by fastboot.
