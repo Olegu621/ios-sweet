@@ -317,6 +317,37 @@ Measured in the recovery on this phone (root, `tools/peridot-input-facts.sh`):
   running kernel (kallsyms + the SPMI core's .text) if a source copy cannot
   be found.
 
+#### SPMI driver: what is still missing and how to get it
+
+The **QMI command encoding** (how a PMIC register is addressed on the SPMI
+arbiter) is the only missing piece. Searched and NOT found in: torvalds v6.1
+and v4.14/v4.19, kernel/common android14-6.1 / android13-6.1 / android12-5.10
+(checked `drivers/spi/` and `drivers/soc/qcom/`), MiCode/Xiaomi_Kernel_OpenSource
+`peridot-u-oss` (has no SPMI driver at all - only `drivers/base/regmap/regmap-spmi.c`
+wrapper and `drivers/mfd/qcom-spmi-pmic.c`), LineageOS qcom_sm8750/sm8550 trees
+(the SPMI driver lives in a Qualcomm-only tree; GitHub's contents API truncates
+`drivers/spi/` at 1000 entries there, so the direct file path must be used).
+
+Two ways forward, in order of preference:
+1. **Recover it from the running recovery kernel** - it has a working SPMI stack.
+   `dd` the recovery_a partition (100 MiB) to the host, find the vmlinux inside
+   the boot image, read its kallsyms table (same trick as for the BTF) to get
+   the address of `spmi_read`/`spmi_register_read`, and disassemble that
+   function with llvm-objdump: the command word it writes into SPMI_MC_CMD
+   *is* the encoding we need.
+2. Find `drivers/spi/qcom-spmi.c` in a Qualcomm tree by direct raw URL (not the
+   contents API), e.g. an older `qcom,spmi` branch of
+   `MiCode/Xiaomi_Kernel_OpenSource` or a LineageOS qcom tree that was
+   branched before the driver was dropped.
+
+**Test plan (safe):** develop and verify the SPMI code **in the recovery**, not
+in the iOS kernel - a wrong QMI encoding only produces a failed read there,
+while in the iOS kernel it would be a panic. Acceptance: read PMK8550
+`pon_hlos@0x1300` and RT `0x1310` (expect the idle RT value 0x10 recorded in
+NOTES) and PMXR2230 RT `0x8d10`; compare with the recovery's own pmic
+drivers, which are already bound (`pmic_pwrkey`, `pmic_resin` exist as input
+devices there).
+
 ### Current completion and next port work
 
 1. Kernel panic investigation / safe disk diagnostics / super geometry repair /
