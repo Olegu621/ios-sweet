@@ -1,0 +1,482 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -112,6 +112,7 @@
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_spmi_peridot.c		standard
+ bsd/dev/sweet_spi_peridot.c		standard
++bsd/dev/sweet_gpi_peridot.c		standard
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+--- a/bsd/dev/sweet_spi_peridot.c
++++ b/bsd/dev/sweet_spi_peridot.c
+@@ -11,6 +11,8 @@
+ #include <pexpert/pexpert.h>
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void sweet_peridot_spi_init(void);
++extern bool sweet_peridot_gpi_init(vm_offset_t);
++extern bool sweet_peridot_gpi_transfer(const uint8_t *, uint8_t *, unsigned, bool);
+ 
+ #define TP_MAX 1024u
+ #define TP_RCG 0x183c8u
+@@ -19,6 +21,7 @@
+ #define TP_ERROR (0x0eu | (3u << 24) | (3u << 28))
+ static vm_offset_t tp_se, tp_gcc, tp_gpio;
+ static unsigned tp_depth;
++static bool tp_use_gpi;
+ static uint8_t tp_tx[TP_MAX + 8], tp_rx[TP_MAX + 8], tp_info[TP_MAX];
+ 
+ static uint32_t
+@@ -159,6 +162,9 @@
+ static bool
+ tp_transfer(unsigned n)
+ {
++	if (tp_use_gpi) {
++		return sweet_peridot_gpi_transfer(tp_tx, tp_rx, n, (tp_rd(tp_se, 0x22c) & 1) != 0);
++	}
+ 	unsigned tx = 0, rx = 0;
+ 	bool ok = false;
+ 	if (!n || n > sizeof(tp_tx) || (tp_rd(tp_se, 0x40) & 0x1001)) {
+@@ -272,7 +278,7 @@
+ 		tp_dma_profile();
+ 		return;
+ 	}
+-	if (probe != 1) {
++	if (probe != 1 && probe != 4) {
+ 		return;
+ 	}
+ 	tp_gcc = ml_io_map(0x100000, 0x60000);
+@@ -337,7 +343,7 @@
+ 	tp_wr(tp_se, 0x22c, 0); /* loopback */
+ 	tp_wr(tp_se, 0x24c, 0); /* CS active low */
+ 	tp_wr(tp_se, 0x250, 0); /* CS0 */
+-	tp_wr(tp_se, 0x25c, tp_rd(tp_se, 0x25c) & ~2u);
++	tp_wr(tp_se, 0x25c, tp_rd(tp_se, 0x25c) & ~1u);
+ 	tp_wr(tp_se, 0x274, 0);
+ 	tp_wr(tp_se, 0x278, 0);
+ 	tp_wr(tp_se, 0x7c, 0); /* validated XO DFS level0 */
+@@ -350,6 +356,12 @@
+ 	}
+ 	while (stale--) {
+ 		(void)tp_rd(tp_se, 0x780);
++	}
++	if (probe == 4) {
++		if (!sweet_peridot_gpi_init(tp_se)) {
++			return;
++		}
++		tp_use_gpi = true;
+ 	}
+ 	/* Isolate host FIFO transport from Goodix power/reset. The transmitted
+ 	 * bytes form a read-only Goodix read even if they reach the real pins. */
+@@ -362,7 +374,7 @@
+ 	tp_wr(tp_se, 0x22c, 1);
+ 	bool loop_ok = tp_transfer(69) && memcmp(tp_tx, tp_rx, 69) == 0;
+ 	tp_wr(tp_se, 0x22c, 0);
+-	printf("PERIDOT SPI: FIFO loopback69 %s first=%02x %02x %02x %02x\n",
++	printf("PERIDOT SPI: loopback69 %s first=%02x %02x %02x %02x\n",
+ 	    loop_ok ? "PASS" : "FAIL", tp_rx[0], tp_rx[1], tp_rx[2], tp_rx[3]);
+ 	if (!loop_ok) {
+ 		return;
+--- /dev/null
++++ b/bsd/dev/sweet_gpi_peridot.c
+@@ -0,0 +1,400 @@
++/* Peridot SE4 SPI through GPI: one idle dynamic APPS GPII, one transaction.
++ * Register/TRE layouts: exact MiCode peridot-u-oss msm_gpi + spi-msm-geni.
++ * No global GPI/SMMU reset. Permanent private buffers survive any timeout.
++ * Init is called only by the explicitly enabled SM8635 SPI probe.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
++bool sweet_peridot_gpi_init(vm_offset_t);
++bool sweet_peridot_gpi_transfer(const uint8_t *, uint8_t *, unsigned, bool);
++
++#define PG_ARENA 0x10000u
++#define PG_TXBUF 0x0000u
++#define PG_RXBUF 0x1000u
++#define PG_TXRING 0x2000u
++#define PG_RXRING 0x2400u
++#define PG_EVRING 0x3000u
++#define PG_RING_N 64u
++#define PG_EV_N 128u
++#define PG_MAX 1032u
++struct pg_tre { uint32_t d[4]; };
++static vm_offset_t pg_regs, pg_se, pg_mem;
++static uint64_t pg_pa;
++static unsigned pg_base, pg_id, pg_wp[2], pg_ev_rp;
++static bool pg_ready, pg_attempted, pg_poisoned, pg_issued, pg_alloc[3];
++
++static uint32_t
++pg_rd(vm_offset_t b, unsigned off)
++{
++	uint32_t v = *(volatile uint32_t *)(b + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++pg_wr(vm_offset_t b, unsigned off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(b + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static void
++pg_sync(unsigned off, unsigned len)
++{
++	flush_dcache64((addr64_t)(pg_pa + off), len, TRUE);
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++static unsigned
++pg_context(unsigned ch)
++{
++	return pg_base + (ch < 2 ? ch * 0x80 : 0x1000);
++}
++
++/* Leave global translation and all existing mappings intact. If SIDb6 is
++ * unmatched/faulting, install one exact-ID bypass in an unused SMR before
++ * issuing any DMA. Only this kernel driver can submit GPI descriptors. */
++static bool
++pg_smmu_ready(void)
++{
++	vm_offset_t smmu = ml_io_map(0x15000000, 0x1000);
++	if (!smmu) {
++		return false;
++	}
++	uint32_t cr0 = pg_rd(smmu, 0), id0 = pg_rd(smmu, 0x20);
++	unsigned count = id0 & 0xff, matches = 0, free_slot = 0xffff;
++	bool bypass = false;
++	if (!(id0 & (1u << 27)) || !count || id0 == 0xffffffffu || (cr0 & 1)) {
++		printf("PERIDOT GPI: unsupported/disconnected SMMU CR0=%#x ID0=%#x\n", cr0, id0);
++		return false;
++	}
++	for (unsigned i = 0; i < count; ++i) {
++		uint32_t smr = pg_rd(smmu, 0x800 + 4 * i), s2cr = pg_rd(smmu, 0xc00 + 4 * i);
++		bool exid = (cr0 & 8) != 0;
++		bool valid = exid ? (s2cr & 0x400) != 0 : (smr & 0x80000000u) != 0;
++		unsigned mask = (smr >> 16) & (exid ? 0xffff : 0x7fff);
++		if (!valid && free_slot == 0xffff) {
++			free_slot = i;
++		}
++		if (valid && ((0xb6u & ~mask) == ((smr & 0xffff) & ~mask))) {
++			++matches;
++			bypass = ((s2cr >> 16) & 3) == 1;
++			printf("PERIDOT GPI: SIDb6 slot%u SMR=%#x S2CR=%#x\n", i, smr, s2cr);
++		}
++	}
++	bool ok = matches == 1 ? bypass : matches == 0 && !(cr0 & (1u << 10));
++	printf("PERIDOT GPI: SMMU existing physical bypass=%d matches=%u CR0=%#x\n", ok, matches, cr0);
++	if (ok) {
++		return true;
++	}
++	/* Hardware0100: CR0=2b0406,110SMRs, no SIDb6 match, first free5.
++	 * Never replace a live mapping or use the extended-ID encoding blindly. */
++	if (matches || free_slot == 0xffff || (cr0 & 8)) {
++		return false;
++	}
++	unsigned so = 0x800 + 4 * free_slot, co = 0xc00 + 4 * free_slot;
++	uint32_t oldsmr = pg_rd(smmu, so), olds2cr = pg_rd(smmu, co);
++	if (oldsmr & 0x80000000u) {
++		return false;
++	}
++	pg_wr(smmu, co, 1u << 16); /* exact stream physical bypass */
++	pg_wr(smmu, so, 0x800000b6u);
++	if (pg_rd(smmu, so) != 0x800000b6u || pg_rd(smmu, co) != (1u << 16)) {
++		pg_wr(smmu, so, oldsmr);
++		pg_wr(smmu, co, olds2cr);
++		printf("PERIDOT GPI: SIDb6 mapping readback failed; DMA withheld\n");
++		return false;
++	}
++	printf("PERIDOT GPI: SIDb6 exact physical bypass in free slot%u; all other entries unchanged\n", free_slot);
++	return true;
++}
++
++static bool
++pg_cmd(unsigned ch, unsigned opcode, unsigned want)
++{
++	unsigned src = pg_base + (ch < 2 ? 0x3090 : 0x3094);
++	unsigned clr = pg_base + (ch < 2 ? 0x30a0 : 0x30a4);
++	unsigned bit = ch < 2 ? 1u << ch : 1;
++	pg_wr(pg_regs, clr, bit);
++	pg_wr(pg_regs, pg_base + (ch < 2 ? 0x3008 : 0x3010),
++	    (opcode << 24) | (ch < 2 ? ch : 0));
++	for (unsigned i = 0; i < 50000; ++i) {
++		unsigned state = (pg_rd(pg_regs, pg_context(ch)) >> 20) & 15;
++		if ((pg_rd(pg_regs, src) & bit) && (want == 0xff || state == want)) {
++			pg_wr(pg_regs, clr, bit);
++			return true;
++		}
++		if (state == 15) {
++			break;
++		}
++		delay(1);
++	}
++	printf("PERIDOT GPI: GPII%u ch%u cmd%u failed ctx=%#x irq=%#x global=%#x error=%#x\n",
++	    pg_id, ch, opcode, pg_rd(pg_regs, pg_context(ch)),
++	    pg_rd(pg_regs, pg_base + 0x3080), pg_rd(pg_regs, pg_base + 0x3100),
++	    pg_rd(pg_regs, pg_base + 0x3200));
++	return false;
++}
++
++/* On any uncertain completion, stop only owned channels and retain memory.
++ * Never recycle buffers, retry DMA, reset the whole block or alter IOMMU. */
++static void
++pg_quiesce(void)
++{
++	pg_poisoned = true;
++	pg_ready = false;
++	for (unsigned i = 0; i < 2; ++i) {
++		if (pg_alloc[i] && ((pg_rd(pg_regs, pg_context(i)) >> 20) & 15) == 2) {
++			(void)pg_cmd(i, 2, 3);
++		}
++	}
++	pg_wr(pg_se, 0xe18, 0);
++	pg_wr(pg_se, 0x604, 2);
++	for (unsigned i = 0; i < 10000 && (pg_rd(pg_se, 0x40) & 1); ++i) {
++		delay(1);
++	}
++}
++
++static void
++pg_irq_config(void)
++{
++	static const unsigned regs[][2] = {
++		{0x3088, 0x4f}, {0x30b8, 1}, {0x3098, 3}, {0x309c, 1},
++		{0x3108, 1}, {0x3120, 15}, {0x3188, 0}, {0x318c, 0},
++		{0x3400, 0}, {0x3404, 0}, {0x3180, 1}, {0x3200, 0},
++		{0x30a0, 3}, {0x30a4, 1}, {0x30c0, 1}, {0x3110, 1}, {0x3128, 15},
++	};
++	for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); ++i) {
++		pg_wr(pg_regs, pg_base + regs[i][0], regs[i][1]);
++	}
++}
++
++static void
++pg_ring_config(unsigned ch)
++{
++	unsigned ctx = pg_context(ch);
++	unsigned off = ch == 0 ? PG_TXRING : ch == 1 ? PG_RXRING : PG_EVRING;
++	unsigned len = (ch == 2 ? PG_EV_N : PG_RING_N) * sizeof(struct pg_tre);
++	uint64_t pa = pg_pa + off;
++	pg_wr(pg_regs, ctx, (16u << 24) | (ch == 2 ? (1u << 16) : ch << 3) | 2);
++	pg_wr(pg_regs, ctx + 4, len);
++	pg_wr(pg_regs, ctx + 8, (uint32_t)pa);
++	pg_wr(pg_regs, ctx + 12, (uint32_t)(pa >> 32));
++	unsigned db = pg_base + (ch < 2 ? 0x2000 + 8 * ch : 0x2100);
++	pg_wr(pg_regs, db + 4, (uint32_t)(pa >> 32));
++	if (ch < 2) {
++		pg_wr(pg_regs, ctx + 0x60, ((!ch) << 16) | (1u << 4) | 4u);
++		pg_wr(pg_regs, ctx + 0x64, 0);
++		pg_wr(pg_regs, ctx + 0x68, 0);
++		pg_wr(pg_regs, ctx + 0x6c, 0);
++		pg_wr(pg_regs, ctx + 0x5c, 1);
++	} else {
++		pg_wr(pg_regs, ctx + 0x20, 0);
++		pg_wr(pg_regs, ctx + 0x24, 0);
++		pg_wr(pg_regs, ctx + 0x28, 0);
++		pg_wr(pg_regs, ctx + 0x2c, 0);
++		pg_wr(pg_regs, ctx + 0x30, 0);
++		pg_wr(pg_regs, ctx + 0x34, 0);
++		pg_wr(pg_regs, db, (uint32_t)(pa + len - 16));
++	}
++}
++
++bool
++sweet_peridot_gpi_init(vm_offset_t se)
++{
++	if (pg_attempted) {
++		return pg_ready;
++	}
++	pg_attempted = true;
++	pg_se = se;
++	pg_regs = ml_io_map(0xa00000, 0x60000);
++	if (!pg_regs) {
++		return false;
++	}
++	bool found = false;
++	for (unsigned i = 1; i <= 4; ++i) {
++		unsigned b = 0x10000 + 0x4000 * i;
++		uint32_t tx = pg_rd(pg_regs, b), rx = pg_rd(pg_regs, b + 0x80);
++		uint32_t ev = pg_rd(pg_regs, b + 0x1000);
++		if (tx != 0xffffffffu && rx != 0xffffffffu && ev != 0xffffffffu &&
++		    !(((tx | rx | ev) >> 20) & 15)) {
++			pg_id = i;
++			pg_base = b;
++			found = true;
++			break;
++		}
++	}
++	if (!found || !pg_smmu_ready()) {
++		printf("PERIDOT GPI: no idle APPS instance or physical mapping; DMA withheld\n");
++		return false;
++	}
++	if (kmem_alloc_contig(kernel_map, &pg_mem, PG_ARENA, 0xffff, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		return false;
++	}
++	ppnum_t pp = pmap_find_phys(kernel_pmap, (addr64_t)pg_mem);
++	pg_pa = ptoa_64(pp);
++	if (!pp || (pg_pa & 0xffff) || pg_pa + PG_ARENA > (1ull << 36)) {
++		printf("PERIDOT GPI: invalid private DMA arena\n");
++		return false;
++	}
++	for (unsigned off = 0; off < PG_ARENA; off += PAGE_SIZE) {
++		if (ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)(pg_mem + off))) != pg_pa + off) {
++			return false;
++		}
++	}
++	pg_sync(0, PG_ARENA);
++	pg_irq_config();
++	if (!pg_cmd(2, 0, 1)) {
++		return false;
++	}
++	pg_alloc[2] = true;
++	pg_ring_config(2);
++	for (unsigned ch = 0; ch < 2; ++ch) {
++		if (!pg_cmd(ch, 0, 1)) {
++			pg_quiesce();
++			return false;
++		}
++		pg_alloc[ch] = true;
++		pg_ring_config(ch);
++	}
++	/* Exact geni_se_select_gpi_mode sequence. External GIC stays masked. */
++	pg_wr(pg_se, 0x618, 0xffffffffu);
++	pg_wr(pg_se, 0x648, 0xffffffffu);
++	pg_wr(pg_se, 0xe1c, 0);
++	pg_wr(pg_se, 0x644, pg_rd(pg_se, 0x644) & ~1u);
++	pg_wr(pg_se, 0x614, pg_rd(pg_se, 0x614) & ~(1u | (1u << 30) | (3u << 26)));
++	pg_wr(pg_se, 0x258, 1);
++	pg_wr(pg_se, 0xe18, 15);
++	for (unsigned ch = 0; ch < 2; ++ch) {
++		if (!pg_cmd(ch, 1, 2)) {
++			pg_quiesce();
++			return false;
++		}
++	}
++	pg_ready = true;
++	printf("PERIDOT GPI: GPII%u SE4 ready, private arena=%#llx, TX/RX64 EV128; polling\n",
++	    pg_id, pg_pa);
++	return true;
++}
++
++static uint64_t
++pg_put(unsigned ch, const struct pg_tre *tre)
++{
++	unsigned off = (ch ? PG_RXRING : PG_TXRING) + pg_wp[ch] * 16;
++	memcpy((void *)(pg_mem + off), tre, sizeof(*tre));
++	pg_wp[ch] = (pg_wp[ch] + 1) % PG_RING_N;
++	pg_sync(off, sizeof(*tre));
++	return pg_pa + off;
++}
++
++/* Match an event to this transaction before accepting any completion. */
++static int
++pg_check_event(const struct pg_tre *ev, uint64_t txlast, uint64_t rxlast,
++    unsigned n, unsigned *done)
++{
++	unsigned type = (ev->d[3] >> 16) & 0xff, ch = ev->d[3] >> 24;
++	unsigned code = ev->d[2] >> 24, len = ev->d[2] & 0xffffff;
++	uint64_t ptr = ev->d[0] | (uint64_t)ev->d[1] << 32;
++	if (type == 0xff || (type == 0x31 && ch < 2)) {
++		return 0;
++	}
++	if (type != 0x22 || ch > 1 || (code != 1 && code != 2 && code != 4) ||
++	    ptr != (ch ? rxlast : txlast) || (len && len != n) || (code == 2 && len != n)) {
++		return -1;
++	}
++	if (code == 2) {
++		*done |= 1u << ch;
++	}
++	return 0;
++}
++
++bool
++sweet_peridot_gpi_transfer(const uint8_t *tx, uint8_t *rx, unsigned n, bool loop)
++{
++	if (!pg_ready || pg_poisoned || !tx || !rx || !n || n > PG_MAX) {
++		return false;
++	}
++	for (unsigned ch = 0; ch < 2; ++ch) {
++		unsigned ring = ch ? PG_RXRING : PG_TXRING;
++		uint32_t rp = pg_rd(pg_regs, pg_context(ch) + 0x10);
++		if (((pg_rd(pg_regs, pg_context(ch)) >> 20) & 15) != 2 ||
++		    (pg_issued && rp != (uint32_t)(pg_pa + ring + pg_wp[ch] * 16))) {
++			printf("PERIDOT GPI: ring not empty/started ch%u RP=%#x\n", ch, rp);
++			pg_quiesce();
++			return false;
++		}
++	}
++	memcpy((void *)(pg_mem + PG_TXBUF), tx, n);
++	memset((void *)(pg_mem + PG_RXBUF), 0, n);
++	pg_sync(PG_TXBUF, n);
++	pg_sync(PG_RXBUF, n);
++	/* CONFIG0: TX/RX packing, mode0,8bit; validated XO DFS0 / 2. */
++	struct pg_tre cfg = { .d = { (3u << 24) | (loop ? 1u << 8 : 0) | 4,
++	    0, 2, (0x22u << 16) | 1 } };
++	struct pg_tre go = { .d = { 3, 0, n, (0x20u << 16) | (1u << 11) | 1 } };
++	uint64_t txpa = pg_pa + PG_TXBUF, rxpa = pg_pa + PG_RXBUF;
++	struct pg_tre txdma = { .d = { (uint32_t)txpa, (uint32_t)(txpa >> 32), n,
++	    (0x10u << 16) | (1u << 9) } };
++	struct pg_tre rxdma = { .d = { (uint32_t)rxpa, (uint32_t)(rxpa >> 32), n,
++	    0x10u << 16 } };
++	(void)pg_put(0, &cfg);
++	(void)pg_put(0, &go);
++	uint64_t txlast = pg_put(0, &txdma), rxlast = pg_put(1, &rxdma);
++	/* RX before GO on TX, as the vendor submits paired channels. */
++	pg_wr(pg_regs, pg_base + 0x2008, (uint32_t)(pg_pa + PG_RXRING + pg_wp[1] * 16));
++	pg_wr(pg_regs, pg_base + 0x2000, (uint32_t)(pg_pa + PG_TXRING + pg_wp[0] * 16));
++	pg_issued = true;
++	unsigned done = 0;
++	for (unsigned iter = 0; iter < 50000; ++iter) {
++		uint32_t hw = pg_rd(pg_regs, pg_base + 0x1010);
++		uint32_t delta = hw - (uint32_t)(pg_pa + PG_EVRING);
++		if (delta >= PG_EV_N * 16 || (delta & 15)) {
++			printf("PERIDOT GPI: invalid event RP=%#x\n", hw);
++			break;
++		}
++		unsigned prod = delta / 16;
++		while (pg_ev_rp != prod) {
++			unsigned off = PG_EVRING + pg_ev_rp * 16;
++			struct pg_tre ev;
++			pg_sync(off, sizeof(ev));
++			memcpy(&ev, (void *)(pg_mem + off), sizeof(ev));
++			pg_ev_rp = (pg_ev_rp + 1) % PG_EV_N;
++			pg_wr(pg_regs, pg_base + 0x2100,
++			    (uint32_t)(pg_pa + PG_EVRING + ((pg_ev_rp + PG_EV_N - 1) % PG_EV_N) * 16));
++			if (pg_check_event(&ev, txlast, rxlast, n, &done)) {
++				printf("PERIDOT GPI: unexpected event %08x %08x %08x %08x\n",
++				    ev.d[0], ev.d[1], ev.d[2], ev.d[3]);
++				pg_quiesce();
++				return false;
++			}
++		}
++		pg_wr(pg_regs, pg_base + 0x30c0, 1);
++		if (done == 3) {
++			pg_sync(PG_RXBUF, n);
++			memcpy(rx, (void *)(pg_mem + PG_RXBUF), n);
++			return true;
++		}
++		if (pg_rd(pg_regs, pg_base + 0x3100) || pg_rd(pg_regs, pg_base + 0x3118)) {
++			break;
++		}
++		delay(1);
++	}
++	printf("PERIDOT GPI: transfer timeout/error n=%u done=%u TX=%#x RX=%#x EV=%#x IRQ=%#x global=%#x general=%#x SE=%#x/%#x\n",
++	    n, done, pg_rd(pg_regs, pg_base), pg_rd(pg_regs, pg_base + 0x80),
++	    pg_rd(pg_regs, pg_base + 0x1000), pg_rd(pg_regs, pg_base + 0x3080),
++	    pg_rd(pg_regs, pg_base + 0x3100), pg_rd(pg_regs, pg_base + 0x3118),
++	    pg_rd(pg_se, 0x40), pg_rd(pg_se, 0x610));
++	pg_quiesce();
++	return false;
++}
++#endif

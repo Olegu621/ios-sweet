@@ -4,11 +4,12 @@
 
 ## Active handoff (peridot, 2026-10-22, Codex continuation)
 
-**Latest continuation (Codex, after OpenCode): phone is in root recovery after0098 timed boot.
+**Latest continuation (Codex, after OpenCode): phone is in root recovery after0100 timed boot.
 SPMI/key patch 0097 passed its first hardware test: all three buttons
 produce matched down/up events delivered to a live HID client. Native
-Goodix SPI0098 failed its first data transfer without panic;0099 corrects
-the FIFO event route and adds loopback to isolate host from sensor state.
+SPI FIFO cannot receive in this IF=1 mode (0098/0099 hardware).0100 found
+free GPI channels and an unmatched/faulting DMA SID;0101 prepares GPI DMA.
+Do not ask user questions: user has left home and requested autonomous work.
 This paragraph and the next section override stale device/status claims below.**
 
 ### Corrected touchscreen facts (Codex, confirmed in live recovery)
@@ -170,6 +171,40 @@ sensor. The recovery's real Goodix driver registers that input device.
 - recovery-cmd-db.txt confirms ldob13 resource42000 and ldob23 resource42800;
   aux [01 46]/[01 50]. Read-only PMIC debug attempts returned XX; do not
   interpret as actual rail voltage/off. Debug cursors restored0/1.
+
+### Hardware0099/0100 and next0101 GPI transport
+
+-0099 loopback FAIL despite IRQEN=f: TXFIFO0/RXFIFO0, MCLK21/CLKSEL0,
+  DMA0/GSI0, MCMD18000004/status41. Still no panic; automatic recovery return.
+  Exact spi-msm-geni source confirms GPI required IF1. Stop trying FIFO.
+-0100 CI **39765831780 succeeded**, commit1fccd9b; artifact checksums passed.
+  cycle-0100-dma-profile: dynamic GPIIs1..4 all TX/RX/EV/IRQ/scratch0.
+  SMMU CR0=2b0406, ID0=4c017e6e, ID1=60000047;110SMRs, SIDb6 unmatched,
+  first free5; USFCFG fault policy, no existing physical bypass. No panic;
+  automatic recovery return. Snapshot itself wrote only GCC clock votes.
+-0101: new sweet_gpi_peridot.c and peridotspi=4 diagnostic backend, explicit
+  only. Selects idle dynamic GPII1..4, never static0. One exact SIDb6 bypass
+  in an unused SMR; refuses any live translation, overlapping matches,
+  unsupported/exID/disconnected SMMU, or failed readback. No global SMMU
+  register changes. Existing display/UFS/etc mappings untouched.
+- Private permanent64KiB contiguous arena (<36bit PA), validated physical
+  contiguity, cache sync; TX/RX rings64 TREs, event ring128. One transfer,
+  <=1032bytes, RX doorbell before TX. Exact vendor CONFIG0/GO/full-duplex3/
+  DMA format; matches completion channel, descriptor pointer, EOT and length.
+  Validates event ring pointer before memory access; poison on uncertainty,
+  stop only owned channels; keep buffers/mapping alive until reboot.
+-0101 fixes CS_TOGGLE to BIT0 from exact spi-msm-geni. GPI diagnostics first
+  loopback69 (safe F1 read bytes), normal firmware/IC_INFO only if PASS.
+  No chip firmware/config writes or reset/power changes yet.
+- Local SPI/GPI compile passes. Actual-functions ASan/UBSan harnesses pass
+  lengths1..1032, high PA, RX/TX/event wrap, TX/RX sequencing, notification,
+  bad channel/pointer/type/length/zero EOT/event-RP, timeout, poisoned retry,
+  owned stops; actual SMMU function tests preserve all other entries/global
+  regs, handle existing mapping/refusal cases and readback rollback.
+- Next: CI0101, MAC-fixed ADT + safe shim, peridotspi=4 sweetdiagreset=45
+  sweetpanicreset=1; inspect GPI init, loopback, version. Hardware pending.
+  Physical finger test unavailable. Touch candidate and HID geometry remain
+  ignored/uncommitted until transport/Goodix initialization is verified.
 
 ### Prepared follow-up (touch candidate (deferred, to rebase after FIFO fix), NOT YET committed or booted)
 
