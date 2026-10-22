@@ -116,10 +116,8 @@
   is symlinked from the read-only-mounted local v1 HFS image; main cache and
   symbols file are regular copies in dyld-cache/ because ipsw mishandles an
   absolute symlink for the initial cache argument.
-- **Next diagnostic boot must include lsd** in sweetsample. The current logs
-  sampled only SpringBoard/backboardd, so they identify the waiting client but
-  not the server's blocking operation. Also sample containermanagerd and
-  mobileactivationd if space permits. Do not patch LaunchServices blindly.
+- 0091 sampled only SpringBoard/backboardd and identified the waiting client.
+  The subsequent 0092 run included lsd and found the server-side block below.
 - 0092 CI **39728179094 succeeded**; downloaded artifact SHA256SUMS verified.
   **Hardware controlled-panic test PASSED**: temporary image
   `shim/out/shim-boot-0092-probe.img` with sweetpanicprobe=1 sweetpanicreset=1
@@ -127,10 +125,10 @@
   `SWEET EARLY PANIC: SWEET DIAG: controlled panic after UFS init @sweet_ufs.c:1105`;
   disk header flush seq UINT64_MAX, 8410 console bytes. Both emergency UFS flush
   and PSCI/BCB automatic recovery return are proven on this phone.
-- Now running `shim/out/shim-boot-0092-sample.img` through peridot-cycle.py:
+- Completed `shim/out/shim-boot-0092-sample.img` through peridot-cycle.py:
   sweetdiagreset=150 sweetpanicreset=1; sample SpringBoard,backboardd,lsd,
   containermanagerd,mobileactivationd. Output `cycle-0092-sample/`.
-  Phone needs no manual intervention while this automatic diagnostic runs.
+  Its captured results and final ordinary boot are recorded below.
 
 ### 0092 automatic UI diagnostic and MobileGestalt blocker
 
@@ -168,7 +166,7 @@
 - Live mobileactivationd log proves `should_hactivate: true` and
   `Activation State: Activated`. Do not reseed/reflash activation state.
 - Offline fsck -fn reports unclean journal and legacy Linux-created hardlink
-  flags/chains (already handled explicitly by kernel patches 0030/0041 etc.).
+  flags/chains (this inherited compatibility issue is noted in patch 0041).
   A SEPARATE reflink/sparse copy `live-root-0092-check.img` was repaired/rechecked
   successfully by host fsck -fy. Neither the original snapshot nor phone was
   modified; do not apply that stale check copy to the phone or attribute the
