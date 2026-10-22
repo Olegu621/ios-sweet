@@ -85,7 +85,7 @@ static int strcmp(const char *a, const char *b)
 #define BLOCK		4096u
 
 /* ---- experiment log (kept in RAM, written to the UFS at the end) ---- */
-static char logbuf[4096];
+static char logbuf[16384];
 static unsigned loglen;
 
 static void log_str(const char *t)
@@ -139,7 +139,7 @@ struct ucd {
 
 static struct utrd utrl[32] __attribute__((aligned(1024)));
 static struct ucd ucd __attribute__((aligned(128)));
-static uint8_t data[2 * BLOCK] __attribute__((aligned(4096)));
+static uint8_t data[4 * BLOCK] __attribute__((aligned(4096)));
 
 static uint64_t ticks(void)
 {
@@ -228,8 +228,20 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	*status_out = ucd.resp[7];		/* SCSI status in the response UPIU */
 	if (*ocs_out) {
 		sense_dump();
+		log_num("scsi_ocs", *ocs_out);
 		return 2;
 	}
+	log_num("rsp_type", ucd.resp[0]);
+	log_num("rsp_6_7", (ucd.resp[6] << 8) | ucd.resp[7]);
+	log_num("rsp_0_3", be32(ucd.resp));
+	log_num("rsp_4_7", be32(ucd.resp + 4));
+	log_num("sense_len", be16(ucd.resp + 32));
+	log_num("sense_0_3", be32(ucd.resp + 34));
+	log_num("sense_4_7", be32(ucd.resp + 38));
+	log_num("sense_8_b", be32(ucd.resp + 42));
+	log_num("sense_c_f", be32(ucd.resp + 46));
+	log_num("sense_10", be16(ucd.resp + 50));
+	log_num("sense_12", be16(ucd.resp + 52));
 	if (ucd.resp[0] != 0x21) {		/* RESPONSE UPIU */
 		sense_dump();
 		return 3;
@@ -291,12 +303,13 @@ static uint32_t dme_set(uint32_t mib, uint32_t val)
 
 
 /* Write one 4 KiB block to LUN 0 (host to device). */
-static uint32_t write_block(uint32_t lba, const void *buf)
+static uint32_t write_blocks(uint32_t lba, const void *buf, uint32_t count)
 {
-	uint8_t cdb[10] = { 0x2a, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, 0, 1, 0 };
+	uint8_t cdb[10] = { 0x2a, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0,
+			    (uint8_t)(count >> 8), (uint8_t)count, 0 };
 	uint32_t ocs, st;
 
-	return scsi(0, cdb, sizeof(cdb), (void *)buf, BLOCK, &ocs, &st, 1);
+	return scsi(0, cdb, sizeof(cdb), (void *)buf, count * BLOCK, &ocs, &st, 1);
 }
 
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
@@ -361,6 +374,7 @@ static int ufs_recover_link(void)
 static uint32_t query(uint8_t opcode, uint8_t idn, uint32_t value, uint32_t *rsp_value)
 {
 	static uint8_t tag;
+	static int qlog;
 	uint32_t ocs = 0, st = 0, rc, rtype, rcode;
 
 	zero(&utrl[0], sizeof(utrl[0]));
@@ -413,12 +427,73 @@ static uint32_t query(uint8_t opcode, uint8_t idn, uint32_t value, uint32_t *rsp
 	rcode = ucd.resp[6];
 	if (rsp_value)
 		*rsp_value = be32(ucd.resp + 20);
-	log_num("query_ocs", rc);
-	log_num("query_type", rtype);
-	log_num("query_rc", rcode);
+	if (qlog < 4) {
+		qlog++;
+		log_num("query_ocs", rc);
+		log_num("query_type", rtype);
+		log_num("query_rc", rcode);
+	}
 	(void)ocs;
 	(void)st;
 	return rc ? rc : rcode;
+}
+
+
+/*
+ * The NOP OUT UPIU (type 0x00): the reference driver sends it to find out
+ * whether the device has finished its own initialisation.
+ */
+static uint32_t nop_out(void)
+{
+	static uint8_t tag;
+	uint32_t ocs = 0, st = 0, rc;
+
+	zero(&utrl[0], sizeof(utrl[0]));
+	zero(&ucd, sizeof(ucd));
+
+	ucd.cmd[0] = 0x00;			/* NOP OUT UPIU */
+	ucd.cmd[3] = ++tag;
+
+	uintptr_t ucd_pa = (uintptr_t)&ucd;
+	utrl[0].dw0 = (1u << 28) | (1u << 24);	/* CT=1, DD=0, I=1 */
+	utrl[0].dw2 = 0x0f;
+	utrl[0].ucdba = (uint32_t)ucd_pa;
+	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
+	utrl[0].resp = (512u / 4) << 16 | (512u / 4);
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	ufs_wr(REG_UTRLDBR, 1);
+	uint64_t start = ticks();
+	while (ufs_rd(REG_UTRLDBR) & 1) {
+		if (ticks() - start > 19200000) {
+			ufs_wr(REG_UTRLCLR, ~1u);
+			log_num("nop_out_timeout", 1);
+			return 0xffffffffu;
+		}
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	rc = utrl[0].dw2 & 0xff;
+	log_num("nop_out_ocs", rc);
+	log_num("nop_out_type", ucd.resp[0]);
+	(void)ocs;
+	(void)st;
+	return rc;
+}
+
+/*
+ * A QUERY READ_DESC of the device descriptor (idn 0).  The descriptor
+ * follows the query answer in the response UPIU.
+ */
+static uint32_t read_device_descriptor(void)
+{
+	uint32_t v = 0, r;
+
+	r = query(0x01, 0x00, 0, &v);		/* READ_DESC, idn 0 (device) */
+	log_num("read_desc_rc", r);
+	con_hex2("UFS DESC", "type=", ucd.resp[0], "code=", ucd.resp[6]);
+	con_hex2("UFS DESC", "d0_3=", be32(ucd.resp + 32), "d4_7=", be32(ucd.resp + 36));
+	return r;
 }
 
 /*
@@ -433,7 +508,7 @@ static void fdeviceinit_handshake(void)
 	log_str("=== fDeviceInit handshake ===\n");
 	rc = query(QUERY_OP_SET_FLAG, QUERY_IDN_FDEVICEINIT, 0, 0);
 	log_num("set_flag_rc", rc);
-	for (int i = 0; i < 50; i++) {
+	for (int i = 0; i < 5; i++) {
 		v = 0xffffffff;
 		rc = query(QUERY_OP_READ_FLAG, QUERY_IDN_FDEVICEINIT, 0, &v);
 		log_num("read_flag_rc", rc);
@@ -470,11 +545,37 @@ static uint32_t try_tur(const char *what)
 	return rc;
 }
 
+/*
+ * Take over the transfer request list: stop, point it at our own
+ * descriptors, run.  A UIC DME RESET or LINK STARTUP invalidates the
+ * host side list, so this has to be redone after every link command.
+ */
+static int take_over_utrl(void)
+{
+	uintptr_t list = (uintptr_t)utrl;
+
+	ufs_wr(REG_UTRLRSR, 0);
+	ufs_wr(REG_UTRLBA, (uint32_t)list);
+	ufs_wr(REG_UTRLBAU, (uint32_t)(list >> 32));
+	ufs_wr(REG_UTRLRSR, 1);
+	con_hex2("UFS", "ours=", (uint32_t)list, "rsr=", ufs_rd(REG_UTRLRSR));
+	/*
+	 * Never ring a doorbell unless the host really uses our list: otherwise
+	 * it would execute whatever ABL left in its own slot 0 (maybe a write).
+	 */
+	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
+	    !(ufs_rd(REG_UTRLRSR) & 1)) {
+		con_str("UFS", "list base not taken: stop");
+		return -1;
+	}
+	return 0;
+}
+
 static void ufs_power_mode_experiment(void)
 {
 	uint32_t lanes_rx = 0, lanes_tx = 0, gear_rx = 0, gear_tx = 0, v = 0;
 
-	log_str("=== power mode experiment ===\n");
+	log_str("=== UFS 4.0 device init candidates ===\n");
 	dme_get(PA_CONNECTEDRXDATALANES, &lanes_rx);
 	dme_get(PA_CONNECTEDTXDATALANES, &lanes_tx);
 	dme_get(PA_MAXRXHSGEAR, &gear_rx);
@@ -487,11 +588,53 @@ static void ufs_power_mode_experiment(void)
 
 	try_tur("before");
 
-	/* 0: the UFS 4.0 device initialisation handshake */
+	/* C1: the reference probe order: NOP OUT, fDeviceInit, descriptor,
+	 * then the power mode change. */
+	nop_out();
 	fdeviceinit_handshake();
-	try_tur("after_fdeviceinit");
+	read_device_descriptor();
+	dme_set(PA_RXGEAR, gear_rx);
+	dme_set(PA_ACTIVERXDATALANES, lanes_rx);
+	dme_set(PA_RXTERMINATION, 1);
+	dme_set(PA_TXGEAR, gear_tx ? gear_tx : gear_rx);
+	dme_set(PA_ACTIVETXDATALANES, lanes_tx);
+	dme_set(PA_TXTERMINATION, 1);
+	dme_set(PA_HSSERIES, PA_HS_MODE_B);
+	dme_set(PA_PWRMODE, PWRMODE_FAST);
+	dme_get(PA_PWRMODE, &v);
+	log_num("pwrmode_after_c1", v);
+	try_tur("c1_probe_order");
 
-	/* 1: the power mode change the reference driver does at the end of probe */
+	/* C2: a link startup (the link comes up in PWM-G1/1 lane) and only
+	 * then the power mode change, as the reference driver does. */
+	uic(UIC_DME_ENABLE, 0, 0, 0);
+	uic(UIC_DME_LINK_STARTUP, 0, 0, 0);
+	take_over_utrl();
+	dme_set(PA_RXGEAR, gear_rx);
+	dme_set(PA_ACTIVERXDATALANES, lanes_rx);
+	dme_set(PA_RXTERMINATION, 1);
+	dme_set(PA_TXGEAR, gear_tx ? gear_tx : gear_rx);
+	dme_set(PA_ACTIVETXDATALANES, lanes_tx);
+	dme_set(PA_TXTERMINATION, 1);
+	dme_set(PA_HSSERIES, PA_HS_MODE_B);
+	dme_set(PA_PWRMODE, PWRMODE_FAST);
+	dme_get(PA_PWRMODE, &v);
+	log_num("pwrmode_after_c2", v);
+	try_tur("c2_link_startup");
+
+	/* C3: the same but asking for slow/fast instead of fast/fast. */
+	dme_set(PA_PWRMODE, 0x22);
+	dme_get(PA_PWRMODE, &v);
+	log_num("pwrmode_after_c3", v);
+	try_tur("c3_pwrmode_22");
+
+	/* C4: a full reset and the complete bring up again. */
+	uic(UIC_DME_RESET, 0, 0, 0);
+	uic(UIC_DME_ENABLE, 0, 0, 0);
+	uic(UIC_DME_LINK_STARTUP, 0, 0, 0);
+	take_over_utrl();
+	nop_out();
+	fdeviceinit_handshake();
 	dme_set(PA_RXGEAR, gear_rx);
 	dme_set(PA_ACTIVERXDATALANES, lanes_rx);
 	dme_set(PA_RXTERMINATION, 1);
@@ -500,18 +643,10 @@ static void ufs_power_mode_experiment(void)
 	dme_set(PA_TXTERMINATION, 1);
 	dme_set(PA_HSSERIES, PA_HS_MODE_B);
 	dme_set(PA_PWRMODE, PWRMODE_FAST);
-	dme_get(PA_PWRMODE, &v);
-	log_num("pwrmode_after", v);
-	try_tur("after_pwrmode");
+	try_tur("c4_full_reset");
 
-	/* 2: a plain reset + enable + link startup, then the power mode again */
-	uic(UIC_DME_RESET, 0, 0, 0);
-	uic(UIC_DME_ENABLE, 0, 0, 0);
-	uic(UIC_DME_LINK_STARTUP, 0, 0, 0);
-	dme_set(PA_PWRMODE, PWRMODE_FAST);
-	try_tur("after_reset_startup");
-
-	/* 3: the well known LUN (UPIU LUN 0xd0) with START STOP UNIT, active */
+	/* C5: START STOP UNIT with the active power condition on the well
+	 * known LUN (UPIU LUN 0xd0). */
 	{
 		static const uint8_t ssu[6] = { 0x1e, 0, 0, 0, 0x00, 0 };
 		uint32_t ocs = 0, st = 0;
@@ -519,7 +654,7 @@ static void ufs_power_mode_experiment(void)
 
 		log_num("ssu_wlun_rc", rc);
 		log_num("ssu_wlun_st", (ocs << 8) | st);
-		try_tur("after_ssu");
+		try_tur("c5_start_stop_unit");
 	}
 }
 
@@ -608,22 +743,8 @@ void test_ufs(void)
 		return;
 	}
 
-	/* Take over the transfer request list: stop, point at ours, run. */
-	ufs_wr(REG_UTRLRSR, 0);
-	uintptr_t list = (uintptr_t)utrl;
-	ufs_wr(REG_UTRLBA, (uint32_t)list);
-	ufs_wr(REG_UTRLBAU, (uint32_t)(list >> 32));
-	ufs_wr(REG_UTRLRSR, 1);
-	con_hex2("UFS", "ours=", (uint32_t)list, "rsr=", ufs_rd(REG_UTRLRSR));
-	/*
-	 * Never ring a doorbell unless the host really uses our list: otherwise
-	 * it would execute whatever ABL left in its own slot 0 (maybe a write).
-	 */
-	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
-	    !(ufs_rd(REG_UTRLRSR) & 1)) {
-		con_str("UFS", "list base not taken: stop");
+	if (take_over_utrl())
 		return;
-	}
 
 	uint32_t ocs = 0, st = 0, rc;
 	static const uint8_t tur[6] = { 0x00 };
@@ -685,13 +806,13 @@ log_it:
 	if (1) {
 		uint8_t *blk = data;
 		uint32_t ocs = 0, st = 0, wrc;
-		unsigned n = loglen < BLOCK - 1 ? loglen : BLOCK - 1;
+		unsigned n = loglen < 4 * BLOCK - 1 ? loglen : 4 * BLOCK - 1;
 
-		for (unsigned i = 0; i < BLOCK; i++)
+		for (unsigned i = 0; i < 4 * BLOCK; i++)
 			blk[i] = 0;
 		for (unsigned i = 0; i < n; i++)
 			blk[i] = logbuf[i];
-		wrc = write_block(LOG_LBA, blk);
+		wrc = write_blocks(LOG_LBA, blk, 4);
 		con_hex2("UFS LOG", "lba=", LOG_LBA, "rc=", wrc);
 		log_num("log_write_rc", wrc);
 	}
