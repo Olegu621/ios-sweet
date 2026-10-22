@@ -267,7 +267,7 @@
 +	unsigned off = ch == 0 ? PG_TXRING : ch == 1 ? PG_RXRING : PG_EVRING;
 +	unsigned len = (ch == 2 ? PG_EV_N : PG_RING_N) * sizeof(struct pg_tre);
 +	uint64_t pa = pg_pa + off;
-+	pg_wr(pg_regs, ctx, (16u << 24) | (ch == 2 ? (1u << 16) : ch << 3) | 2);
++	pg_wr(pg_regs, ctx, (16u << 24) | (ch == 2 ? (1u << 16) : (ch == 0 ? 1u << 3 : 0)) | 2);
 +	pg_wr(pg_regs, ctx + 4, len);
 +	pg_wr(pg_regs, ctx + 8, (uint32_t)pa);
 +	pg_wr(pg_regs, ctx + 12, (uint32_t)(pa >> 32));
