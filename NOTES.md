@@ -21,7 +21,7 @@
   Local C syntax checks passed for sweet_ufs.c and sweet_early.c with latest CI
   headers. A host harness using the actual writer passes Linux-format decode,
   non-power-of-two wrap, bounds and nested-writer checks (ASan/UBSan).
-  Hardware survival across reboot is being tested with the safe shim. Pull via
+  Hardware retention FAILED in both tests (pstore empty). Pull via
   `tools/peridot-pstore-pull.sh research/diagnostics-20261022/pstore-N`.
 - 0090 also fixes QUERY READ_DESC being sent as a standard WRITE query (0x81);
   READ_DESC/READ_ATTR/READ_FLAG must use standard READ (0x01). The old shim log
@@ -59,10 +59,67 @@
   safe replacement; DO NOT boot older diagnostic images (including the loader
   fallback in older payload images) because they contain the bad disk writer.
 
+### Confirmed UFS + iOS userspace boot (0090)
+
+- CI **39725536321** succeeded; kernel SHA256
+  `463030af2d0eda63323dabf7f46d0d9507cebcec203ffe54f85d42afdefb34d4`.
+  New safe shim + new ADT image `shim/out/shim-boot-0090-baseline.img`, SHA256
+  `5183714966d6d3a3ea13e49b06a321f37cb4a94b849e996497cb520e0944940b`.
+  Booted temporarily with `sweetkeys=0 sweettouch=0 sweetusb=0 ufslogsecs=1`.
+- **Actual saved phone log**: `research/diagnostics-20261022/boot-0090-baseline.txt`
+  (938024 bytes, flush #246). It confirms DME reset/enable/link startup all return
+  zero, NOP IN, fDeviceInit clears, descriptor queries now succeed, one real
+  UNIT ATTENTION (sense 70 00 06 ... ASC 29) then successful TUR, userdata found,
+  root HFS mounted, launchd/SpringBoard/backboardd run. NO KERNEL PANIC in this
+  whole boot. Native disk console logging is confirmed on the hardware.
+- Ramoops remained empty after the safe shim PSCI reset AND the physical reset
+  after 0090. Do not claim retention works. The backup collector idea was not
+  implemented because the native disk log now gives the full userspace trace.
+- UI blocker observed in the log: display reports **1220x2712**, while iOS makes
+  a **1125x2436** render surface then a 1220x2712 output surface. backboardd loops
+  on absent AppleM2ScalerCSCDriver (12127 identical lines), zero completed swaps.
+  Inference: mismatched canvas sizes force the unsupported Apple scaler path.
+- Patch **0091**, commit **e5c5bc4**, CI **39727326004 success**: always present
+  the iPhone X logical canvas unless sweetfb_native=1; signed centering offsets
+  also handle the F6's larger physical panel. Do not use SM7150 key/touch/USB
+  MMIO on SM8635: the root compatible string gates those old probes. Both C/C++
+  files compile locally. Image `shim/out/shim-boot-0091-ui.img` was temporarily
+  booted with sweetfb_noconsole=1, awaiting user screen observation / next log.
+- Patch **0092**, commit **d82bfc9**: early trace/panic text also enters the main
+  ring; try-lock + polled, bounded UFS flush before normal panic debugger path.
+  Optional sweetpanicreset=1 resets after capture; sweetdiagreset=N (30..3600 s)
+  captures/reset on a timer; sweetpanicprobe=1 is an explicit controlled panic
+  immediately after UFS init, for testing capture without random hardware faults.
+  These flags are OFF by default. Local C compilation and actual flush function
+  host harness (guards, busy lock, bounds, ring/header, failed I/O) pass.
+  Hardware validation is still required.
+- `tools/peridot-cycle.py IMAGE OUT` automates recovery -> set 32-byte BCB
+  boot-recovery (backed up) -> temporary fastboot boot -> wait for diagnostic
+  return -> disk log pull. It waits until recovery uptime >=20 s: early recovery
+  reconfigures its USB gadget and an immediate pull can fail with "error: closed".
+
+### Peripheral facts gathered read-only in recovery
+
+- SM8635 DWC3 is **DWC_usb31**: GSNPSID 0x33313130; not sweet's 0x5533320a.
+  Full core dump `recovery-dwc3-registers.txt`, clock debug dump `usb-clocks.txt`.
+  Mainline gcc-sm8650.c USB30 GDSCR +0x39004, master +0x39018, sleep +0x39024,
+  UTMI +0x39028, cfg-NoC +0x39088, aggre-AXI +0x3908c (NOT yet hardware verified
+  as register addresses on SM8635; recovery clk_print_regs only reports values).
+- Live SPMI bus0: core 0xc400000/0x3000, config 0xc42d000/0x4000, observer
+  0xc440000/0x80000. Linux v7 APID map is core+0x2000+4*apid; observer stride
+  0x20; ownership config+4*apid; bus0 count from core+4 bits[10:0].
+  Old SWEET keys_core=0xc440000 is now the OBSERVER, old observer 0xe600000 is
+  unrelated; these probes cannot be enabled on peridot unchanged.
+- Power/resin are PMK8550 SID0 PON_HLOS at 0x1300, RT status 0x1310, bits7/6
+  (Linux pmk8350 gen3 keys), not old 0x0810 bits0/1. Recovery idle RT read 0x10.
+  Volume-up is PMXR2230 GPIO6: its controller at 0x8800, SID2 (resolve the parent
+  from live.dts), RT 0x8d10. Do not infer SID7 from a random debug-regmap read.
+
 ### Immediate next actions
 
-1. Finish CI 39725536321 and build a new payload using the NEW shim source and
-   newly generated peridot ADT (old peridot-high.adt lacks ramoops).
+1. Finish 0092 CI. First run controlled panic with sweetpanicprobe=1
+   sweetpanicreset=1 through tools/peridot-cycle.py; require its panic string in
+   the pulled log. Then run a 150-second unattended UI diagnostic boot.
 2. Geometry repair DONE and readback verified. BCB command was temporarily set
    to `boot-recovery` (32 bytes, backup saved) so the safe shim PSCI reset should
    return to recovery automatically. Safe shim boot accepted by fastboot.
