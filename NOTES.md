@@ -2,6 +2,78 @@
 
 ## >>> THIS CLONE IS THE PERIDOT PORT (POCO F6 / SM8635) — sweet notes below are HISTORY/REFERENCE (project paused ~2026-10-18) <<<
 
+## Active handoff (peridot, 2026-10-22, Codex continuation)
+
+**This section supersedes the older 06:00 handoff. Phone is in recovery.**
+
+- Latest OpenCode session was read from its SQLite DB. Its last action was a
+  successful temporary boot of `shim-boot-0053p.img` (kernel CI 39723628466,
+  bounded SCSI retry); no panic text/result was collected after that boot.
+- Recovery READ-ONLY inspection confirms `userdata` still has HFS+ label iOSRoot.
+  **Do not reflash userdata based on the old speculation that Android erased it.**
+- The persistent userdata log has no SWEETLOG header. This logger only starts
+  after UFS init, so it cannot diagnose a failure in UFS init.
+- Patch **0090**, commit **0714697**, CI **39725536321**: mirror console and the
+  first panic/trace into the recovery's existing ramoops console RAM. Live DT
+  and recovery module parameters agree: reserved base 0xa7000000, 4 MiB total,
+  console 2 MiB, pmsg 2 MiB, record_size=0, ECC=0. ADT now supplies a
+  `/sweet-ramoops` node; QEMU omits it. This does not write UFS.
+  Local C syntax checks passed for sweet_ufs.c and sweet_early.c with latest CI
+  headers. A host harness using the actual writer passes Linux-format decode,
+  non-power-of-two wrap, bounds and nested-writer checks (ASan/UBSan).
+  Hardware survival across reboot is still UNTESTED. Pull via
+  `tools/peridot-pstore-pull.sh research/diagnostics-20261022/pstore-N`.
+- 0090 also fixes QUERY READ_DESC being sent as a standard WRITE query (0x81);
+  READ_DESC/READ_ATTR/READ_FLAG must use standard READ (0x01). The old shim log
+  contains descriptor error 0xfe. This is a real protocol bug, but is not yet
+  established as the cause of the kernel panic.
+- Old recursive `ufs_scsi_retry` is a real unbounded retry bug. Disassembly of
+  local `out-0089f` shows a recursive BL with a 0x120-byte stack
+  frame. The original panic itself was not saved: stack overflow remains a
+  hypothesis for THAT boot, not a confirmed diagnosis of the latest kernel.
+
+### Confirmed super corruption from the OLD diagnostic shim (repair pending approval)
+
+- The OLD shim's LOG_LBA=208895 is the LAST 4 KiB block of **rescue**, not cache.
+  Its 4-block WRITE spills three blocks into the start of **super**. Live sysfs:
+  rescue (sda29) starts at 1409024 sectors, size 262144 sectors (512-byte units);
+  super starts at 1671168 sectors, i.e. device 4 KiB LBA 208896.
+- Readback confirms text from the shim log in super's first block and zeroes in
+  BOTH LP geometry blocks at +0x1000/+0x2000. Six LP metadata copies at
+  +0x3000,+0x13000,+0x23000,+0x33000,+0x43000,+0x53000 are intact: all header and
+  table SHA-256 checks pass; the three primary slot records equal their backups.
+- Saved read-only backups: `research/diagnostics-20261022/super-first4m.backup`,
+  `super-first256k.backup`, `old-shim-log-region.backup` and
+  `misc-first4096.backup`. The BCB command was empty. All are gitignored.
+- Offline candidate `super-geometry-restore-8k.bin` rebuilds ONLY the geometry
+  blocks: metadata_max_size=65536, slots=3, logical_block_size=4096, struct size52,
+  AOSP SHA-256 checksum. SHA256:
+  `9dca626a8cd8145d128a1802fbfbf568dddcea7ad26fa4e23edb096e804f9849`.
+  Applying it to an offline copy makes host lpdump parse all three slots.
+  **No repair has been written to the phone yet. User approval requested.**
+- Shim source is being fixed to remove ALL SCSI WRITE support and retain its
+  diagnostic log in the same ramoops RAM instead. `shim-diag-ramoops.img` is the
+  safe replacement; DO NOT boot older diagnostic images (including the loader
+  fallback in older payload images) because they contain the bad disk writer.
+
+### Immediate next actions
+
+1. Finish CI 39725536321 and build a new payload using the NEW shim source and
+   newly generated peridot ADT (old peridot-high.adt lacks ramoops).
+2. If geometry repair is approved: push the 8192-byte candidate into /tmp in
+   recovery, write to `super` with bs=4096 seek=1 count=2 conv=notrunc, sync,
+   reread the first 4 MiB and require exact equality with the offline candidate
+   (except untouched reserved first block). Preserve all six metadata records.
+3. Boot 0090 temporarily, collect first panic via recovery pstore. For a baseline
+   that avoids unported SM7150 peripherals use `sweetkeys=0 sweettouch=0 sweetusb=0`.
+   These drivers still contain SWEET MMIO constants incompatible with SM8635;
+   do not label their failures UFS errors. Next isolate one probe at a time.
+4. Update this handoff with actual hardware logs and final image hashes.
+
+References checked: Linux v6.1 `fs/pstore/ram_core.c`, `fs/pstore/ram.c`,
+`include/ufs/ufs.h`; AOSP `fs_mgr/liblp/include/liblp/metadata_format.h`.
+Their source copies and diagnostics are in research/diagnostics-20261022/.
+
 ## Agent handoff (peridot, 2026-10-22, 06:00)
 
 **STATUS: the phone needs a physical power cycle (USB gadget wedged, it came up in

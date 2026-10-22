@@ -84,9 +84,10 @@ static int strcmp(const char *a, const char *b)
 
 #define BLOCK		4096u
 
-/* The last 4 KiB block of the "cache" partition (sda29, 128 MiB at LBA
- * 176128): a scratch area the recovery can read back with dd. */
-#define LOG_LBA		208895u
+/* Peridot's live DT reserves a 2 MiB ramoops console at this address.
+ * The former disk log used the last rescue block plus three super blocks.
+ * Never use raw UFS sectors as diagnostic scratch storage. */
+#define LOG_RAM_BASE	0xa7000000UL
 
 /* ---- experiment log (kept in RAM, written to the UFS at the end) ---- */
 static char logbuf[16384];
@@ -112,7 +113,7 @@ static void log_num(const char *tag, uint32_t v)
 		t[k++] = "0123456789abcdef"[v & 15];
 		v >>= 4;
 	}
-	while (k)
+	while (k && loglen < sizeof(logbuf) - 2)
 		logbuf[loglen++] = t[--k];
 	log_str("\n");
 }
@@ -305,16 +306,6 @@ static uint32_t dme_set(uint32_t mib, uint32_t val)
 	return r;
 }
 
-
-/* Write one 4 KiB block to LUN 0 (host to device). */
-static uint32_t write_blocks(uint32_t lba, const void *buf, uint32_t count)
-{
-	uint8_t cdb[10] = { 0x2a, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0,
-			    (uint8_t)(count >> 8), (uint8_t)count, 0 };
-	uint32_t ocs, st;
-
-	return scsi(0, cdb, sizeof(cdb), (void *)buf, count * BLOCK, &ocs, &st, 1);
-}
 
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
 {
@@ -552,23 +543,24 @@ static void fdeviceinit_handshake(void)
  */
 
 /*
- * Write the log into the last blocks of the cache partition.  The device
- * only accepts the write while it is in the state it accepts commands in,
- * so this is called after every step that may change that state.
+ * Retain the log in Linux's non-ECC ramoops console format. MMU is off,
+ * so byte stores and a barrier suffice; no SCSI write is involved.
  */
-static void write_log(void)
+static void retain_log(void)
 {
-	uint8_t *blk = data;
-	uint32_t ocs = 0, st = 0, wrc;
+	volatile uint32_t *header = (volatile uint32_t *)LOG_RAM_BASE;
+	volatile uint8_t *bytes = (volatile uint8_t *)(LOG_RAM_BASE + 12);
 	unsigned n = loglen < 4 * BLOCK - 1 ? loglen : 4 * BLOCK - 1;
 
-	for (unsigned i = 0; i < 4 * BLOCK; i++)
-		blk[i] = 0;
+	header[0] = 0;
 	for (unsigned i = 0; i < n; i++)
-		blk[i] = logbuf[i];
-	wrc = write_blocks(LOG_LBA, blk, 4);
-	log_num("log_write_rc", wrc);
-	con_hex2("UFS LOG", "lba=", LOG_LBA, "rc=", wrc);
+		bytes[i] = (uint8_t)logbuf[i];
+	header[1] = n;
+	header[2] = n;
+	__asm__ volatile("dsb sy" ::: "memory");
+	header[0] = 0x43474244; /* PERSISTENT_RAM_SIG */
+	__asm__ volatile("dsb sy" ::: "memory");
+	con_hex2("RAM LOG", "base=", LOG_RAM_BASE, "bytes=", n);
 }
 
 /*
@@ -594,7 +586,7 @@ static uint32_t try_tur(const char *what)
 		if (!rc)
 			break;
 	}
-	write_log();
+	retain_log();
 	return rc;
 }
 
@@ -760,8 +752,6 @@ static const char *fs_type(uint32_t lba)
 	return "other";
 }
 
-static uint32_t cache_first, cache_last;	/* the scratch ext4 partition we log into */
-
 /* One line per GPT entry of at least 64 MiB: name, first LBA, size in MiB (4K blocks). */
 static void list_partitions(uint32_t entry_lba, uint32_t nent)
 {
@@ -785,10 +775,6 @@ static void list_partitions(uint32_t entry_lba, uint32_t nent)
 		if (((last - first + 1) >> 8) < 64)	/* keep the screen to the big ones */
 			continue;
 		con_hex2(name, "lba=", (uint32_t)first, "MiB=", (uint32_t)((last - first + 1) >> 8));
-		if (!strcmp(name, "cache")) {
-			cache_first = (uint32_t)first;
-			cache_last = (uint32_t)last;
-		}
 		if (!strcmp(name, "userdata") || !strcmp(name, "cust") ||
 		    !strcmp(name, "cache"))
 			con_str(" fs", fs_type((uint32_t)first));
@@ -875,9 +861,9 @@ void test_ufs(void)
 	list_partitions(elba, nent);
 log_it:
 
-	/* Publish the log into the scratch "cache" partition. */
-	write_log();
-	con_str("UFS", "log written to cache partition");
+	/* Publish the log into recovery-reserved RAM. */
+	retain_log();
+	con_str("UFS", "log retained in ramoops RAM");
 }
 
 /* The whole log on the panel, 48 chars per line. */
