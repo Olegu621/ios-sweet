@@ -297,6 +297,26 @@ Measured in the recovery on this phone (root, `tools/peridot-input-facts.sh`):
    SPI, plus the coordinate scaling from the raw 19520x43424 to the logical
    1125x2436.
 
+#### Where the missing pieces are (searched, so nobody repeats it)
+
+- The QCOM **GENI SE** register map (all offsets we need) is in
+  research/diagnostics-20261022/linux-ref/geni-se.h (525 lines, from
+  LineageOS android_kernel_qcom_sm8750) and
+  spi-geni-qcom-qcom.c (1276 lines, the QCOM variant of the driver).
+  The mainline copies are spi-geni-qcom.c / qcom-geni-se.c (same content).
+- The **QMI SPMI command format** (how a PMIC register is read/written over
+  the SPMI arbiter) is NOT in torvalds v6.1 nor in kernel/common
+  android14-6.1: `drivers/spi/qcom-spmi.c` only exists in the Qualcomm
+  vendor trees (and in the 4.x era of mainline, which GitHub raw no longer
+  serves for those paths). regmap-spmi.c (have it) is only a wrapper and
+  calls spmi_register_read()/spmi_register_write() from the SPMI core.
+  The core itself (drivers/soc/qcom/spmi.c in the Qualcomm tree) holds the
+  command encoding we need.
+- Practical alternative to the missing reference: the *running recovery* has a
+  working SPMI stack, so the command encoding can be recovered from the
+  running kernel (kallsyms + the SPMI core's .text) if a source copy cannot
+  be found.
+
 ### Current completion and next port work
 
 1. Kernel panic investigation / safe disk diagnostics / super geometry repair /
