@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index b8e580f..e484885 100644
+index b8e580f..301f1e6 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -59,10 +59,16 @@ extern void sweet_usb_probe(void);
@@ -23,8 +23,40 @@ index b8e580f..e484885 100644
  #define REG_UTRLBA      0x50
  #define REG_UTRLBAU     0x54
  #define REG_UTRLDBR     0x58
-@@ -257,11 +263,18 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+@@ -151,9 +157,18 @@ dma_clean(uint32_t off, uint32_t len)
+  * One SCSI command in slot 0, data (if any) to/from the bounce buffer
+  * (to the device when write is set). Returns 0 or an errno.
+  */
++static int ufs_scsi_retry(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write);
++
+ static int
+ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ {
++	return ufs_scsi_retry(cdb, cdb_len, len, write);
++}
++
++static int
++ufs_scsi_retry(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
++{
++	bool ucs_retried = false;
+ 	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
+ 	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
+ 	uint64_t ucd_pa = su.dma_pa + DMA_UCD, bounce_pa = su.dma_pa + DMA_BOUNCE;
+@@ -255,13 +270,31 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 
+ 	uint32_t ocs = utrd->dw2 & 0xff;
  	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
++		/*
++		 * After a device reset the first command comes back with a
++		 * unit attention ("power on, reset or bus device reset
++		 * occurred", ASC 0x29 in the sense data) and only the retry
++		 * gets through.  The reference driver does the same.
++		 */
++		if (!write && !ucs_retried) {
++			ucs_retried = true;
++			printf("SWEET UFS: command 0x%02x refused, retrying\n", cdb[0]);
++			return ufs_scsi_retry(cdb, cdb_len, len, write);
++		}
  		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
  		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
 -		printf("SWEET UFS: upiu %02x %02x %02x %02x %02x %02x %02x %02x sense %02x %02x %02x %02x %02x %02x %02x %02x\n",
@@ -47,7 +79,7 @@ index b8e580f..e484885 100644
  		printf("SWEET UFS: cdb %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x utrd %08x %08x %08x\n",
  		    ucd->cmd[16], ucd->cmd[17], ucd->cmd[18], ucd->cmd[19],
  		    ucd->cmd[20], ucd->cmd[21], ucd->cmd[22], ucd->cmd[23],
-@@ -374,22 +387,25 @@ ufs_find_partition(const char *want)
+@@ -374,22 +407,25 @@ ufs_find_partition(const char *want)
   * Returns the full UICCMDARG0 or 0xffffffff on timeout.
   */
  static uint32_t
@@ -79,11 +111,16 @@ index b8e580f..e484885 100644
  		}
  		delay(1);
  	}
-@@ -398,6 +414,33 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
- 	return 0xffffffffu;
+@@ -399,41 +435,71 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
  }
  
-+/*
+ /*
+- * The SCSI path through the UTR list is the only judge of a healthy device:
+- * any TEST UNIT READY answer (GOOD, or a refusing CHECK CONDITION) proves the
+- * UIC link and the UTP layer are alive, and DME link commands play no part in
+- * that state. UIC commands even never complete on this controller after the
+- * bootloader (observed on 0051p: DME RESET/LINK STARTUP time out with IS 0),
+- * so run them only for a doorbell that never clears.
 + * DME GET / DME SET of a PA layer attribute (UniPro 1.8, JESD220).
 + * The attribute number goes into ARG_1 shifted up by 16 bits
 + * (UIC_ARG_MIB), the value into ARG_3.
@@ -110,296 +147,88 @@ index b8e580f..e484885 100644
 +	return r;
 +}
 +
- /*
-  * The SCSI path through the UTR list is the only judge of a healthy device:
-  * any TEST UNIT READY answer (GOOD, or a refusing CHECK CONDITION) proves the
-@@ -416,7 +459,7 @@ ufs_link_init(void)
- 	}
- 	printf("SWEET UFS: SCSI unreachable, UIC link init (IS 0x%x IE 0x%x HCS 0x%x)\n",
++/*
++ * Bring the UniPro link and the device up the way the reference driver
++ * does: a DME RESET, a DME ENABLE and a DME LINK STARTUP.  After the reset
++ * the device only accepts the fDeviceInit handshake and its SCSI commands
++ * come back with a unit attention until they are retried, and the host
++ * side transfer request list has to be taken over again.
+  */
+ static int
+ ufs_link_init(void)
+ {
+-	static const uint8_t tur[6] = { 0x00 };
+-	int rc = ufs_scsi(tur, sizeof(tur), 0, false);
+-	if (rc != ETIMEDOUT) {
+-		return rc;
+-	}
+-	printf("SWEET UFS: SCSI unreachable, UIC link init (IS 0x%x IE 0x%x HCS 0x%x)\n",
++	uint32_t r;
++
++	printf("SWEET UFS: UIC link init (IS 0x%x IE 0x%x HCS 0x%x)\n",
  	    ufs_rd(REG_IS), ufs_rd(REG_IE), ufs_rd(REG_HCS));
 -	uint32_t r = ufs_uic(0x14, 0);          /* DME RESET */
-+	uint32_t r = ufs_uic(0x14, 0, 0, 0, NULL);  /* DME RESET */
- 	printf("SWEET UFS: DME RESET result 0x%x IS 0x%x\n", r, ufs_rd(REG_IS));
- 	if (r != 0xffffffffu) {
- 		uint32_t hcs = 0;
-@@ -429,11 +472,257 @@ ufs_link_init(void)
- 		}
- 		printf("SWEET UFS: HCS after DME RESET 0x%x\n", hcs);
- 	}
+-	printf("SWEET UFS: DME RESET result 0x%x IS 0x%x\n", r, ufs_rd(REG_IS));
+-	if (r != 0xffffffffu) {
+-		uint32_t hcs = 0;
+-		for (int i = 0; i < 1000000; i++) {
+-			hcs = ufs_rd(REG_HCS);
+-			if (hcs & HCS_UCRDY) {
+-				break;
+-			}
+-			delay(1);
+-		}
+-		printf("SWEET UFS: HCS after DME RESET 0x%x\n", hcs);
+-	}
 -	r = ufs_uic(0x16, 0);                   /* DME LINK STARTUP */
-+	r = ufs_uic(0x16, 0, 0, 0, NULL);        /* DME LINK STARTUP */
- 	printf("SWEET UFS: DME LINK STARTUP result 0x%x\n", r);
+-	printf("SWEET UFS: DME LINK STARTUP result 0x%x\n", r);
++	r = ufs_uic(0x14, 0, 0, 0, NULL);      /* DME RESET */
++	printf("SWEET UFS: DME RESET result %u IS 0x%x\n", r, ufs_rd(REG_IS));
++	r = ufs_uic(0x12, 0, 0, 0, NULL);      /* DME ENABLE */
++	printf("SWEET UFS: DME ENABLE result %u IS 0x%x\n", r, ufs_rd(REG_IS));
++	r = ufs_uic(0x16, 0, 0, 0, NULL);      /* DME LINK STARTUP */
++	printf("SWEET UFS: DME LINK STARTUP result %u IS 0x%x HCS 0x%x\n",
++	    r, ufs_rd(REG_IS), ufs_rd(REG_HCS));
  	return ((r != 0xffffffffu) && ((r & 0xffff) == 0)) ? 0 : ENXIO;
  }
  
-+
-+
 +/*
-+ * A NOP OUT UPIU (type 0x00).  The reference driver sends it as the very
-+ * first thing after the link is up: the device answers with a NOP IN and
-+ * that proves it has finished its own initialisation.
-+ */
-+static int
-+ufs_nop_out(void)
-+{
-+	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
-+	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
-+	uint64_t ucd_pa = su.dma_pa + DMA_UCD;
-+	uint32_t ocs;
-+
-+	bzero(utrd, sizeof(*utrd));
-+	bzero(ucd, sizeof(*ucd));
-+
-+	ucd->cmd[0] = 0x00;                     /* NOP OUT UPIU */
-+	ucd->cmd[3] = ++su.tag;
-+
-+	utrd->dw0 = (1u << 28) | (1u << 24);    /* CT=1, DD=0, I=1 */
-+	utrd->dw2 = 0x0f;
-+	utrd->ucdba = (uint32_t)ucd_pa;
-+	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
-+	utrd->resp = (512u / 4) << 16 | (512u / 4);
-+
-+	if (su.cache) {
-+		dma_clean(DMA_UTRL, sizeof(*utrd));
-+		dma_clean(DMA_UCD, 16);
-+		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
-+	} else {
-+		dma_sync(DMA_UTRL, sizeof(*utrd));
-+		dma_sync(DMA_UCD, sizeof(*ucd));
-+	}
-+	__builtin_arm_dsb(0xf);
-+
-+	ufs_wr(REG_UTRLDBR, 1);
-+	uint64_t deadline;
-+	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
-+	deadline += mach_absolute_time();
-+	while (ufs_rd(REG_UTRLDBR) & 1) {
-+		if (mach_absolute_time() > deadline) {
-+			ufs_wr(REG_UTRLCLR, ~1u);
-+			printf("SWEET UFS: NOP OUT timed out\n");
-+			return ETIMEDOUT;
-+		}
-+		delay(1);
-+	}
-+	__builtin_arm_dsb(0xf);
-+	ufs_wr(REG_IS, ufs_rd(REG_IS));
-+
-+	dma_sync(DMA_UTRL, sizeof(*utrd));
-+	if (su.cache) {
-+		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
-+	} else {
-+		dma_sync(DMA_UCD, sizeof(*ucd));
-+	}
-+	ocs = utrd->dw2 & 0xff;
-+	printf("SWEET UFS: NOP OUT ocs 0x%x upiu 0x%x\n", ocs, ucd->resp[0]);
-+	return ocs ? EIO : 0;
-+}
-+
-+/*
-+ * A QUERY request (UPIU type 0x16).  The payload is "struct utp_upiu_query":
-+ * opcode, idn, index, selector, reserved, length, value, reserved.  The
-+ * answer arrives in the QUERY response UPIU (type 0x36); its value field
-+ * sits at offset 20 (12 byte UPIU header + 8).
-+ */
-+static int
-+ufs_query_len(uint8_t opcode, uint8_t idn, uint32_t len, uint32_t value,
-+    uint32_t *rsp_value)
-+{
-+	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
-+	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
-+	uint64_t ucd_pa = su.dma_pa + DMA_UCD;
-+	uint32_t ocs;
-+
-+	bzero(utrd, sizeof(*utrd));
-+	bzero(ucd, sizeof(*ucd));
-+
-+	ucd->cmd[0] = 0x16;                     /* QUERY REQUEST UPIU */
-+	ucd->cmd[1] = 0x00;
-+	ucd->cmd[2] = 0x00;                     /* LUN */
-+	ucd->cmd[3] = ++su.tag;
-+	ucd->cmd[4] = 0x00;                     /* command set type / IID */
-+	ucd->cmd[5] = (opcode == 0x05) ? 0x01 : 0x81;   /* query function */
-+	/*
-+	 * The query payload starts right behind the 12 byte UPIU header
-+	 * (struct utp_upiu_query), not behind a data length field like the
-+	 * command UPIU has: opcode, idn, index, selector, reserved, length,
-+	 * value.
-+	 */
-+	ucd->cmd[12] = opcode;
-+	ucd->cmd[13] = idn;
-+	ucd->cmd[14] = 0;                       /* index */
-+	ucd->cmd[15] = 0;                       /* selector */
-+	ucd->cmd[18] = (uint8_t)(len >> 8);      /* length */
-+	ucd->cmd[19] = (uint8_t)len;
-+	ucd->cmd[20] = (uint8_t)(value >> 24);
-+	ucd->cmd[21] = (uint8_t)(value >> 16);
-+	ucd->cmd[22] = (uint8_t)(value >> 8);
-+	ucd->cmd[23] = (uint8_t)value;
-+
-+	/* No data phase: DD = 0, command type 1 (UFS storage device). */
-+	utrd->dw0 = (1u << 28) | (1u << 24);
-+	utrd->dw2 = 0x0f;                       /* OCS invalid until updated */
-+	utrd->ucdba = (uint32_t)ucd_pa;
-+	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
-+	utrd->resp = (512u / 4) << 16 | (512u / 4);
-+
-+	if (su.cache) {
-+		dma_clean(DMA_UTRL, sizeof(*utrd));
-+		dma_clean(DMA_UCD, 24);
-+		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
-+	} else {
-+		dma_sync(DMA_UTRL, sizeof(*utrd));
-+		dma_sync(DMA_UCD, sizeof(*ucd));
-+	}
-+	__builtin_arm_dsb(0xf);
-+
-+	ufs_wr(REG_UTRLDBR, 1);
-+	uint64_t deadline;
-+	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
-+	deadline += mach_absolute_time();
-+	while (ufs_rd(REG_UTRLDBR) & 1) {
-+		if (mach_absolute_time() > deadline) {
-+			ufs_wr(REG_UTRLCLR, ~1u);
-+			printf("SWEET UFS: QUERY 0x%02x timed out\n", opcode);
-+			return ETIMEDOUT;
-+		}
-+		delay(1);
-+	}
-+	__builtin_arm_dsb(0xf);
-+	ufs_wr(REG_IS, ufs_rd(REG_IS));
-+
-+	dma_sync(DMA_UTRL, sizeof(*utrd));
-+	if (su.cache) {
-+		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
-+	} else {
-+		dma_sync(DMA_UCD, sizeof(*ucd));
-+	}
-+
-+	ocs = utrd->dw2 & 0xff;
-+	uint32_t type = ucd->resp[0], rcode = ucd->resp[6];
-+	uint32_t v = (ucd->resp[20] << 24) | (ucd->resp[21] << 16) |
-+	    (ucd->resp[22] << 8) | ucd->resp[23];
-+	if (rsp_value) {
-+		*rsp_value = v;
-+	}
-+	printf("SWEET UFS: QUERY opcode 0x%02x idn 0x%02x: ocs 0x%x type 0x%x code 0x%x value 0x%x\n",
-+	    opcode, idn, ocs, type, rcode, v);
-+	if (ocs || type != 0x36 || rcode) {
-+		return EIO;
-+	}
-+	return 0;
-+}
-+
-+static int
-+ufs_query(uint8_t opcode, uint8_t idn, uint32_t value, uint32_t *rsp_value)
-+{
-+	return ufs_query_len(opcode, idn, 0, value, rsp_value);
-+}
-+
-+
-+/*
-+ * START STOP UNIT on the well known "device" LUN (the UPIU LUN byte of
-+ * SCSI LUN 0xc150 is 0xd0).  The power condition modifier selects the
-+ * device power mode: 0x00 active, 0x10 sleep, 0x20 power down.  Going
-+ * down and up again is the UFS level equivalent of the VCC toggle the
-+ * reference driver does with the device.
-+ */
-+static int
-+ufs_start_stop(uint8_t pcm)
-+{
-+	uint8_t cdb[6] = { 0x1e, 0, 0, 0, pcm, 0 };
-+	uint8_t lun = su.lun;
-+	int error;
-+
-+	su.lun = 0xd0;                          /* the well known device LUN */
-+	error = ufs_scsi(cdb, sizeof(cdb), 0, false);
-+	su.lun = lun;
-+	printf("SWEET UFS: START STOP UNIT pcm 0x%x: %s\n", pcm,
-+	    error ? "refused" : "ok");
-+	return error;
-+}
-+
-+/*
-+ * The UFS 3.0/4.0 device initialisation handshake: the host sets the
-+ * fDeviceInit flag and waits for the device to clear it again (Linux
-+ * ufshcd_complete_dev_init).  The device descriptor of this UFS 4.0 part
-+ * says bInitialPowerMode = 01h, i.e. the device comes up in Sleep power
-+ * mode and answers every SCSI command with CHECK CONDITION / NOT READY
-+ * until the host has moved it out of it.
-+ */
-+static int
-+ufs_fdeviceinit(void)
-+{
-+	uint32_t v = 0, r;
-+
-+	r = ufs_query(0x06, 0x01, 0, NULL);     /* SET_FLAG fDeviceInit */
-+	printf("SWEET UFS: fDeviceInit set result %u\n", r);
-+	for (int i = 0; i < 50; i++) {
-+		v = 0xffffffff;
-+		r = ufs_query(0x05, 0x01, 0, &v); /* READ_FLAG fDeviceInit */
-+		printf("SWEET UFS: fDeviceInit read result %u value 0x%x\n", r, v);
-+		if (r == 0 && !(v & 1)) {
-+			return 0;
-+		}
-+	}
-+	return EIO;
-+}
-+
-+/*
-+ * Configure the M-PHY for the negotiated gear and move the device into the
-+ * Fast power mode (Linux ufshcd_dme_change_power_mode).  The PA layer
-+ * attribute numbers are the UniPro 1.8 ones (JESD220).
++ * The whole device initialisation the reference driver does before it
++ * talks to the device: a NOP OUT, the fDeviceInit handshake, the device
++ * and configuration descriptors and the PA layer power mode change.
 + */
 +static void
-+ufs_power_mode(void)
++ufs_device_init(void)
 +{
-+	uint32_t lanes_rx = 0, lanes_tx = 0, gear_rx = 0, gear_tx = 0, v = 0;
-+
-+	ufs_dme_get(0x1581, &lanes_rx);         /* PA_CONNECTEDRXDATALANES */
-+	ufs_dme_get(0x1561, &lanes_tx);         /* PA_CONNECTEDTXDATALANES */
-+	ufs_dme_get(0x1587, &gear_rx);          /* PA_MAXRXHSGEAR */
-+	ufs_uic(0x03, 0x1587 << 16, 0, 0, &gear_tx);   /* peer: PA_MAXRXHSGEAR */
-+	if (!gear_tx) {
-+		gear_tx = gear_rx;
-+	}
-+	ufs_dme_get(0x1571, &v);                /* PA_PWRMODE */
-+	printf("SWEET UFS: lanes %u/%u gears %u/%u power mode 0x%x\n",
-+	    lanes_rx, lanes_tx, gear_rx, gear_tx, v);
-+
-+	ufs_dme_set(0x1583, gear_rx);           /* PA_RXGEAR */
-+	ufs_dme_set(0x1580, lanes_rx);          /* PA_ACTIVERXDATALANES */
-+	ufs_dme_set(0x1584, 1);                 /* PA_RXTERMINATION */
-+	ufs_dme_set(0x1568, gear_tx);           /* PA_TXGEAR */
-+	ufs_dme_set(0x1560, lanes_tx);          /* PA_ACTIVETXDATALANES */
-+	ufs_dme_set(0x1569, 1);                 /* PA_TXTERMINATION */
-+	ufs_dme_set(0x156a, 2);                 /* PA_HSSERIES: rate B */
-+	ufs_dme_set(0x1571, 0x11);              /* PA_PWRMODE: fast / fast */
-+	ufs_dme_get(0x1571, &v);
-+	printf("SWEET UFS: power mode now 0x%x\n", v);
++	ufs_nop_out();
++	ufs_fdeviceinit();
++	ufs_query_len(0x01, 0x00, 0x40, 0, NULL);  /* device descriptor */
++	ufs_query_len(0x01, 0x01, 0x20, 0, NULL);  /* configuration descriptor */
++	ufs_power_mode();
 +}
 +
  static int
  ufs_take_over_host(void)
  {
-@@ -704,6 +993,21 @@ sweet_ufs_init(void)
- 
- 	lck_mtx_lock(&sweet_ufs_lock);
- 	error = ufs_take_over_host();
-+	if (!error) {
-+		/*
-+		 * Initialise the device the way the reference driver does and
-+		 * in the same order: NOP OUT first (it tells us that the device
-+		 * has finished its own init), then the fDeviceInit handshake,
-+		 * then read the descriptors, and only then the power mode.
-+		 */
-+		ufs_start_stop(0x20);		/* device power down */
-+		ufs_start_stop(0x00);		/* device active again */
-+		ufs_nop_out();
-+		ufs_fdeviceinit();
-+		ufs_query_len(0x01, 0x00, 0x40, 0, NULL);  /* device descriptor */
-+		ufs_query_len(0x01, 0x01, 0x20, 0, NULL);  /* configuration desc */
-+		ufs_power_mode();
-+	}
+@@ -707,11 +773,20 @@ sweet_ufs_init(void)
  	if (!error) {
  		error = ufs_link_init();
  	}
++	if (!error) {
++		/* The reset invalidated our transfer request list: take it again. */
++		error = ufs_take_over_host();
++	}
++	if (!error) {
++		/* NOP OUT, fDeviceInit, the descriptors, the power mode. */
++		ufs_device_init();
++	}
+ 	if (!error) {
+ 		static const uint8_t tur[6] = { 0x00 };
+-		/* The first command after the bootloader may report a unit attention. */
++		/* The first command after the reset may report a unit attention. */
+ 		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
+ 		}
++		printf("SWEET UFS: TEST UNIT READY: %s\n", error ? "refused" : "good");
+ 	}
+ 	if (!error) {
+ 		error = ufs_find_partition(want);
