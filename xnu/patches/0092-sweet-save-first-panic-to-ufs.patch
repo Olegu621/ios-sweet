@@ -1,0 +1,147 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -50,6 +50,7 @@
+ extern int hz;
+ static void sweet_log_start(void);
+ static void sweet_ramoops_init(void);
++static void sweet_diag_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+@@ -1097,6 +1098,12 @@
+ 	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
++	sweet_diag_start();
++	uint32_t panic_probe = 0;
++	PE_parse_boot_argn("sweetpanicprobe", &panic_probe, sizeof(panic_probe));
++	if (panic_probe == 1) {
++		panic("SWEET DIAG: controlled panic after UFS init");
++	}
+ 	sweet_sample_start();
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	if (sweet_legacy_peripherals()) {
+@@ -1267,6 +1274,92 @@
+ 	uint64_t total, seq;
+ };
+ 
++/* Save the first panic before entering the debugger. No allocation, no
++ * waiting for a mutex, no sleeping while polling UFS. If a UFS operation
++ * owns the slot, leave its descriptors and bounce buffer alone. Writes
++ * still go through ufs_write_blocks' normal userdata bounds checks. */
++void sweet_log_panic_flush(void);
++void
++sweet_log_panic_flush(void)
++{
++	if (!su.ready || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS ||
++	    !lck_mtx_try_lock(&sweet_ufs_lock)) {
++		return;
++	}
++	bool wait = su.wait;
++	su.wait = false;
++	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
++	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
++	void *bounce = (void *)(su.dma + DMA_BOUNCE);
++	int error = 0;
++	for (uint32_t off = 0; off < SWEET_LOG_SIZE && !error; off += BOUNCE_SIZE) {
++		memcpy(bounce, sweet_log_ring + off, BOUNCE_SIZE);
++		error = ufs_write_blocks(base + 1 + off / UFS_BLOCK, BOUNCE_SIZE / UFS_BLOCK);
++	}
++	if (!error) {
++		struct sweet_log_header h = {
++			.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
++			.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = UINT64_MAX,
++		};
++		bzero(bounce, UFS_BLOCK);
++		memcpy(bounce, &h, sizeof(h));
++		error = ufs_write_blocks(base, 1);
++	}
++	if (!error) {
++		(void)ufs_sync_cache();
++	}
++	su.wait = wait;
++	lck_mtx_unlock(&sweet_ufs_lock);
++}
++
++/* Explicit diagnostic boot only. The host sets BCB boot-recovery before
++ * fastboot boot, so PSCI reset returns to recovery for automatic log pull. */
++static uint32_t sweet_diag_seconds, sweet_diag_panic_reset;
++
++static void
++sweet_diag_reset(void)
++{
++	register uint64_t x0 __asm__("x0") = 0x84000009; /* PSCI SYSTEM_RESET */
++	register uint64_t x1 __asm__("x1") = 0;
++	register uint64_t x2 __asm__("x2") = 0;
++	register uint64_t x3 __asm__("x3") = 0;
++	__builtin_arm_dsb(0xf);
++	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) :: "memory");
++}
++
++void sweet_diag_panic_done(void);
++void
++sweet_diag_panic_done(void)
++{
++	if (sweet_diag_panic_reset) {
++		sweet_diag_reset();
++	}
++}
++
++static void
++sweet_diag_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	static int chan;
++	(void)tsleep(&chan, PZERO, "sweetdiag", hz * (int)sweet_diag_seconds);
++	printf("SWEET DIAG: timed capture after %u seconds; resetting to recovery\n",
++	    sweet_diag_seconds);
++	sweet_log_panic_flush();
++	sweet_diag_reset();
++}
++
++static void
++sweet_diag_start(void)
++{
++	thread_t thread;
++	PE_parse_boot_argn("sweetpanicreset", &sweet_diag_panic_reset, sizeof(sweet_diag_panic_reset));
++	PE_parse_boot_argn("sweetdiagreset", &sweet_diag_seconds, sizeof(sweet_diag_seconds));
++	if (sweet_diag_seconds >= 30 && sweet_diag_seconds <= 3600 &&
++	    kernel_thread_start(sweet_diag_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++		printf("SWEET DIAG: automatic recovery reset in %u seconds\n", sweet_diag_seconds);
++	}
++}
++
+ static void
+ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -24,7 +24,9 @@
+ #define EARLY_COLS (EARLY_WIDTH / EARLY_CELL_W)
+ 
+ extern unsigned char iso_font[256 * 16];
+-extern void sweet_ramoops_putc(char c);
++extern void sweet_log_append(const char *c, int size);
++extern void sweet_log_panic_flush(void);
++extern void sweet_diag_panic_done(void);
+ 
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+@@ -45,7 +47,7 @@
+ void
+ sweet_early_putc(char c)
+ {
+-	sweet_ramoops_putc(c);
++	sweet_log_append(&c, 1);
+ 	if (early_disabled) {
+ 		return;
+ 	}
+@@ -128,6 +130,8 @@
+ 	va_end(copy);
+ 	sweet_early_putc('\n');
+ 	__asm__ volatile("dsb sy" ::: "memory");
++	sweet_log_panic_flush();
++	sweet_diag_panic_done();
+ }
+ 
+ void
