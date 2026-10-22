@@ -63,10 +63,11 @@ shim run whose log is read back over adb.**
    the complete 18 byte sense data, which is the key diagnostic.
 
 ### Ready to use artefacts
-- `xnu/kernel-0089peridot` = CI **39715795688** (success) = patches up to 0089:
+- `xnu/kernel-0089peridot` = CI **39716833397** (success) = patches up to 0089:
   0089 = correct UIC offsets (0x90/0x94/0x98/0x9c) + the reference init order
   (NOP OUT -> fDeviceInit QUERY -> device/configuration descriptor ->
-  PA_PWRMODE = 0x11) + the sense data dumped at its real offset.
+  PA_PWRMODE = 0x11) + the sense data dumped at its real offset + a device
+  power cycle (START STOP UNIT power down / active on the well known LUN).
 - `shim/out/payload-0053p.bin` + `shim/out/shim-boot-0053p.img` = that kernel with
   peridot-high.adt and the 0052p cmdline.
 - `shim/out/shim-diag.img` = the diagnostic shim (no payload): runs the UFS
@@ -76,6 +77,19 @@ shim run whose log is read back over adb.**
   `adb shell 'dd if=/dev/block/sda29 bs=4096 skip=32764 count=4'`.
   NOTE: the log buffer was 16 KiB but the shim's `data` buffer was 8 KiB - the
   overflow hung the phone (fixed now: `data[4 * BLOCK]`).
+
+### The candidates the shim tries (in this order, each followed by a TUR)
+1. NOP OUT, fDeviceInit QUERY (SET_FLAG/READ_FLAG idn 1), the device and the
+   configuration descriptor (QUERY READ_DESC), then the PA layer power mode
+   change (gears, lanes, termination, HS series, PA_PWRMODE = 0x11) - exactly
+   the order of the reference driver.
+2. A link startup (DME ENABLE + DME LINK STARTUP) and the power mode again.
+3. The same but PA_PWRMODE = 0x22.
+4. A full DME RESET + ENABLE + LINK STARTUP + the whole sequence again.
+5. START STOP UNIT (active) on the well known LUN (UPIU LUN 0xd0).
+6. A device power cycle: START STOP UNIT power down (0x20) then active (0x00).
+If any of them makes the TUR work, the whole log (including the full 18 byte
+sense data) is written into the cache partition and can be read back.
 
 ### Next actions (in order)
 1. **Power cycle the phone** (hold the power button ~10 s). It is in Android with a
