@@ -296,9 +296,25 @@ sensor. The recovery's real Goodix driver registers that input device.
   ignored research. No claim that native touch works until hardware proof.
   Framebuffer cross-compile passed; actual packer ASan/UBSan16000row cases,
   decoder corrupt/incomplete records and PNG exact pixels/CRC passed.
-- Next CI0104/0105, temporary peridotspi=4,sweetfbshot=60,sweetdiagreset=90,
+- CI0104/0105 **39776739626**, commitaa5d035, currently building.
+  Next temporary peridotspi=4,sweetfbshot=60,sweetdiagreset=90,
   existing sweethidtest may keep UI awake. No questions/physical tests while
   user is absent. Power and touch candidates below remain uncommitted.
+
+- Further read-only recovery evidence: DMAengine summary shows a90000.spi on
+  dma1chan0/1; gpi_dmaa00000_gpii0 IPC logs show routine successful Goodix
+  health reads and RX/TX completions. Live DT dmas args4=2 decodes through
+  STATIC_GPII_BMSK1e/SHIFT1 to GPII0. Our test used dynamic GPII1 instead.
+  gpi-static0-candidate.c matches exact DT and refuses nonidle GPII0 before
+  any writes; NOT committed yet, waiting0104 event/pointer evidence.
+- Recovery debugfs mounted for inspection (ephemeral). Temporarily increased
+  GPI0/1 ipc_log_lvl2->5 for8s, captured logs, restored both2 (verified).
+- Touch rebase prepared/compiled against GPI+power in ignored
+  spi.gpi-power-touch-candidate.c and touch-gpi-rebase-candidate.patch.
+  Explicit peridotspi=5 requires power init and validated IC_INFO before
+  poller; peridotspi=4 remains diagnostic. Actual touch parser, power
+  sequence and v3 RSC tests pass. Local buildtree SPI restored to power-only
+  candidate so power/touch stages can be committed separately after bus proof.
 
 ### Deferred power candidate (NOT committed or booted)
 

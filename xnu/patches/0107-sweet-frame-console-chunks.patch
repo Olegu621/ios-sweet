@@ -1,0 +1,27 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -341,7 +341,23 @@
+ 			return;
+ 		}
+ 		bool use_rle = rlelen < 2 * width;
+-		IOLog("SWEET SHOT row %u %c %s\n", y, use_rle ? 'R' : 'P', use_rle ? rle : raw);
++		const char *payload = use_rle ? rle : raw;
++		unsigned plen = use_rle ? rlelen : (unsigned)strlen(raw);
++		/* The console truncates a single line, so every row is written
++		 * as numbered chunks that the decoder joins again. */
++		const unsigned chunk = 120;
++		unsigned total = (plen + chunk - 1) / chunk;
++		if (!total) {
++			total = 1;
++		}
++		for (unsigned off = 0; off < plen; off += chunk) {
++			unsigned n = plen - off < chunk ? plen - off : chunk;
++			char part[128];
++			memcpy(part, payload + off, n);
++			part[n] = 0;
++			IOLog("SWEET SHOT row %u %c %u/%u %s\n", y, use_rle ? 'R' : 'P',
++			    off / chunk, total, part);
++		}
+ 	}
+ 	IOLog("SWEET SHOT end %08x\n", sum);
+ }

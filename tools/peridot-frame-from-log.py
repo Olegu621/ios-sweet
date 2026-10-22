@@ -13,6 +13,7 @@ import zlib
 def decode(text):
     frame = None
     completed = None
+    pending = {}
     for line in text.splitlines():
         at = line.find('SWEET SHOT ')
         if at < 0:
@@ -24,17 +25,34 @@ def decode(text):
             if not (1 <= width <= 160 and 1 <= height <= 512):
                 raise ValueError('invalid frame dimensions')
             frame = (width, height, power, {})
+            pending = {}
             continue
         if frame is None:
             raise ValueError('frame record without begin')
         width, height, power, rows = frame
-        row = re.fullmatch(r'SWEET SHOT row (\d+) ([PR]) ([0-9a-f]+)', line)
-        if row:
-            y, mode, payload = row.groups()
+        chunked = re.fullmatch(r'SWEET SHOT row (\d+) ([PR]) (\d+)/(\d+) ([0-9a-f]+)', line)
+        single = re.fullmatch(r'SWEET SHOT row (\d+) ([PR]) ([0-9a-f]+)', line)
+        if chunked or single:
+            if chunked:
+                y, mode, index, total, payload = chunked.groups()
+                index, total = int(index), int(total)
+            else:
+                y, mode, payload = single.groups()
+                index, total = 0, 1
             y = int(y)
             if y >= height or y in rows or len(payload) > width * 4:
                 raise ValueError('invalid or duplicate row')
-            data = bytes.fromhex(payload)
+            part = pending.setdefault(y, {'mode': mode, 'chunks': [], 'total': total})
+            if part['mode'] != mode or part['total'] != total:
+                raise ValueError('mixed row chunks')
+            if index != len(part['chunks']):
+                raise ValueError('out of order row chunk')
+            part['chunks'].append(payload)
+            if len(part['chunks']) != total:
+                continue
+            data = b''
+            for hexpart in part['chunks']:
+                data += bytes.fromhex(hexpart)
             if mode == 'R':
                 if len(data) % 2 or any(n == 0 for n in data[::2]):
                     raise ValueError('invalid RLE run')
