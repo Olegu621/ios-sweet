@@ -1,0 +1,42 @@
+--- a/bsd/dev/sweet_gpi_peridot.c
++++ b/bsd/dev/sweet_gpi_peridot.c
+@@ -16,7 +16,7 @@
+ bool sweet_peridot_gpi_init(vm_offset_t);
+ bool sweet_peridot_gpi_transfer(const uint8_t *, uint8_t *, unsigned, bool);
+ 
+-#define PG_ARENA 0x10000u
++#define PG_ARENA 0x4000u
+ #define PG_TXBUF 0x0000u
+ #define PG_RXBUF 0x1000u
+ #define PG_TXRING 0x2000u
+@@ -26,6 +26,11 @@
+ #define PG_EV_N 128u
+ #define PG_MAX 1032u
+ struct pg_tre { uint32_t d[4]; };
++_Static_assert(PG_MAX <= PG_RXBUF - PG_TXBUF, "TX buffer overlaps RX");
++_Static_assert(PG_MAX <= PG_TXRING - PG_RXBUF, "RX buffer overlaps rings");
++_Static_assert(PG_TXRING + PG_RING_N * 16 <= PG_RXRING, "TX ring overlaps RX");
++_Static_assert(PG_RXRING + PG_RING_N * 16 <= PG_EVRING, "RX ring overlaps events");
++_Static_assert(PG_EVRING + PG_EV_N * 16 <= PG_ARENA, "event ring exceeds arena");
+ static vm_offset_t pg_regs, pg_se, pg_mem;
+ static uint64_t pg_pa;
+ static unsigned pg_base, pg_id, pg_wp[2], pg_ev_rp;
+@@ -288,14 +293,15 @@
+ 		printf("PERIDOT GPI: no idle APPS instance or physical mapping; DMA withheld\n");
+ 		return false;
+ 	}
+-	if (kmem_alloc_contig(kernel_map, &pg_mem, PG_ARENA, 0xffff, 0, 0,
++	if (kmem_alloc_contig(kernel_map, &pg_mem, PG_ARENA, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		return false;
+ 	}
+ 	ppnum_t pp = pmap_find_phys(kernel_pmap, (addr64_t)pg_mem);
+ 	pg_pa = ptoa_64(pp);
+-	if (!pp || (pg_pa & 0xffff) || pg_pa + PG_ARENA > (1ull << 36)) {
+-		printf("PERIDOT GPI: invalid private DMA arena\n");
++	if (!pp || (pg_pa & PAGE_MASK) || pg_pa + PG_ARENA > (1ull << 36)) {
++		printf("PERIDOT GPI: invalid private DMA arena PA=%#llx page-mask=%#llx size=%#x\n",
++		    pg_pa, (unsigned long long)PAGE_MASK, PG_ARENA);
+ 		return false;
+ 	}
+ 	for (unsigned off = 0; off < PG_ARENA; off += PAGE_SIZE) {

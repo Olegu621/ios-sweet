@@ -4,7 +4,7 @@
 
 ## Active handoff (peridot, 2026-10-22, Codex continuation)
 
-**Latest continuation (Codex, after OpenCode): phone is in root recovery after0100 timed boot.
+**Latest continuation (Codex, after OpenCode): phone is in root recovery after0102 timed boot.
 SPMI/key patch 0097 passed its first hardware test: all three buttons
 produce matched down/up events delivered to a live HID client. Native
 SPI FIFO cannot receive in this IF=1 mode (0098/0099 hardware).0100 found
@@ -245,6 +245,35 @@ sensor. The recovery's real Goodix driver registers that input device.
   both ring/data streams and all earlier slot/global preservation cases.
 - Next CI0102 then temporary peridotspi=4/diag45 capture; inspect exact
   readback, context proof and GPI initialization/loopback. Hardware pending.
+
+### 0102 hardware: physical routing proven / 0103 arena fix
+
+- CI0102 **39772262983 succeeded**, commitca8d904; kernel SHA256SUMS passed.
+  cycle-0102-smmu returned automatically without panic. First launch refused
+  before touching BCB because ADB vanished after host suspend/resume; local
+  adb kill/start-server restored it, then the test ran normally.
+- Hardware CONFIRMED firmware substitution: requested S2CR10000 reads20000
+  (FAULT). SMR writes do work. Boot SMR0 SID60 references CB0; CBAR1f000,
+  SCTLRa9f00e0 (M=0, S1 disabled / stage2 bypass). Reusing CB0 for exact
+  SIDb6 slot5 and SIDa3 slot6 passes readback and physical-path checks.
+  No CB or global register was written. Existing streams stay intact.
+- Next guard refused private DMA arena; still NO GPI DMA/control issued.
+ 0102 did not print its PA, so exact failing predicate is not yet observed.
+  The unnecessary64KiB physical-alignment check is a likely cause: XNU's
+  kmem_alloc_contig mask aligns VA, physical alignment uses separate
+  pnum_mask. All buffers/rings fit16KiB and only CPU-page/ring alignment is
+  required.0103 allocates16KiB with PAGE_MASK, retains36-bit/contiguity
+  checks, adds layout static assertions and detailed PA on any refusal.
+-0103 local compile and actual GPI ASan/UBSan tests pass, including a
+  physical base aligned16KiB but NOT64KiB, all lengths/ring wraps/errors.
+  Next CI0103 and peridotspi=4/diag45 automatic test. Hardware pending.
+- Temporary host sleep/idle inhibitor is running: systemd-inhibit PID803348,
+  exec session39754, pid saved research/.../host-inhibit.pid. Keep during
+  cycles, release our inhibitor when stopping; no persistent power config.
+  Use GODEBUG=http2client=0 for gh if HTTP2 streams reset. Do not ask user
+  for physical interaction: user explicitly requested autonomous work.
+- gpi-unused-cb-candidate.c was prepared but is NOT used/committed; existing
+  CB0 reuse proved sufficient. Do not enable that unnecessary fallback.
 
 ### Deferred power candidate (NOT committed or booted)
 
