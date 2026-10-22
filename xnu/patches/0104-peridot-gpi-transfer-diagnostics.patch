@@ -1,0 +1,42 @@
+--- a/bsd/dev/sweet_gpi_peridot.c
++++ b/bsd/dev/sweet_gpi_peridot.c
+@@ -411,7 +411,7 @@
+ 	pg_wr(pg_regs, pg_base + 0x2008, (uint32_t)(pg_pa + PG_RXRING + pg_wp[1] * 16));
+ 	pg_wr(pg_regs, pg_base + 0x2000, (uint32_t)(pg_pa + PG_TXRING + pg_wp[0] * 16));
+ 	pg_issued = true;
+-	unsigned done = 0;
++	unsigned done = 0, seen = 0;
+ 	for (unsigned iter = 0; iter < 50000; ++iter) {
+ 		uint32_t hw = pg_rd(pg_regs, pg_base + 0x1010);
+ 		uint32_t delta = hw - (uint32_t)(pg_pa + PG_EVRING);
+@@ -425,6 +425,10 @@
+ 			struct pg_tre ev;
+ 			pg_sync(off, sizeof(ev));
+ 			memcpy(&ev, (void *)(pg_mem + off), sizeof(ev));
++			if (seen++ < 8) {
++				printf("PERIDOT GPI: event %08x %08x %08x %08x\n",
++				    ev.d[0], ev.d[1], ev.d[2], ev.d[3]);
++			}
+ 			pg_ev_rp = (pg_ev_rp + 1) % PG_EV_N;
+ 			pg_wr(pg_regs, pg_base + 0x2100,
+ 			    (uint32_t)(pg_pa + PG_EVRING + ((pg_ev_rp + PG_EV_N - 1) % PG_EV_N) * 16));
+@@ -451,6 +455,19 @@
+ 	    pg_rd(pg_regs, pg_base + 0x1000), pg_rd(pg_regs, pg_base + 0x3080),
+ 	    pg_rd(pg_regs, pg_base + 0x3100), pg_rd(pg_regs, pg_base + 0x3118),
+ 	    pg_rd(pg_se, 0x40), pg_rd(pg_se, 0x610));
++	printf("PERIDOT GPI: pointers TX=%#x/%#x RX=%#x/%#x EV=%#x/%#x events=%u\n",
++	    pg_rd(pg_regs, pg_base + 0x10), pg_rd(pg_regs, pg_base + 0x18),
++	    pg_rd(pg_regs, pg_base + 0x90), pg_rd(pg_regs, pg_base + 0x98),
++	    pg_rd(pg_regs, pg_base + 0x1010), pg_rd(pg_regs, pg_base + 0x1018), seen);
++	printf("PERIDOT GPI: SE mode=%#x events=%#x irqs=%#x M/S=%#x/%#x cmd=%#x clk=%#x cs=%#x loop=%#x txlen=%#x rxlen=%#x\n",
++	    pg_rd(pg_se, 0x258), pg_rd(pg_se, 0xe18), pg_rd(pg_se, 0xe1c),
++	    pg_rd(pg_se, 0x610), pg_rd(pg_se, 0x640), pg_rd(pg_se, 0x600),
++	    pg_rd(pg_se, 0x48), pg_rd(pg_se, 0x224), pg_rd(pg_se, 0x22c),
++	    pg_rd(pg_se, 0x26c), pg_rd(pg_se, 0x270));
++	pg_sync(PG_RXBUF, n);
++	const uint8_t *sample = (const uint8_t *)(pg_mem + PG_RXBUF);
++	printf("PERIDOT GPI: RX sample %02x %02x %02x %02x\n", sample[0],
++	    n > 1 ? sample[1] : 0, n > 2 ? sample[2] : 0, n > 3 ? sample[3] : 0);
+ 	pg_quiesce();
+ 	return false;
+ }

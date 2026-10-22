@@ -8,7 +8,8 @@
 SPMI/key patch 0097 passed its first hardware test: all three buttons
 produce matched down/up events delivered to a live HID client. Native
 SPI FIFO cannot receive in this IF=1 mode (0098/0099 hardware).0100 found
-free GPI channels and an unmatched/faulting DMA SID;0101 prepares GPI DMA.
+free GPI channels and an unmatched/faulting DMA SID.0103 starts private DMA
+channels but loopback times out;0104/0105 add event and screen diagnostics.
 Do not ask user questions: user has left home and requested autonomous work.
 This paragraph and the next section override stale device/status claims below.**
 
@@ -274,6 +275,30 @@ sensor. The recovery's real Goodix driver registers that input device.
   for physical interaction: user explicitly requested autonomous work.
 - gpi-unused-cb-candidate.c was prepared but is NOT used/committed; existing
   CB0 reuse proved sufficient. Do not enable that unnecessary fallback.
+
+### 0103 hardware / 0104 diagnostics / 0105 autonomous screen capture
+
+- CI0103 **39774556058 succeeded**, commit5fe4398; kernel SHA256SUMS passed.
+  cycle-0103-gpi returned to recovery automatically, no panic. Private arena
+  PA8c3e48000 is16KiB aligned, not64KiB. Allocation, TX/RX start and event
+  configuration now pass. First69-byte loopback DMA timed out, done=0;
+  contexts TX1020001a/RX10200112/EV10110012, IRQ8, global/general0,
+  SE0/40000080. RX stop remained STOP_IN_PROC4; memory retained, no retry.
+-0104 adds bounded event trace (first8), timeout ring RP/WP, SE mode/clock/
+  command/count registers and four RX bytes. This identifies what hardware
+  consumed before changing transport. Existing transfer behavior unchanged.
+  Local compile and actual-functions GPI ASan/UBSan tests pass.
+-0105 adds optional sweetfbshot=N: one read-only RGB332160px-wide physical
+  framebuffer snapshot into EXISTING SWEETLOG console, no new disk area.
+  Default off,1..3600s, max512rows, raw/RLE lines<400chars, FNV checksum.
+  tools/peridot-frame-from-log.py validates dimensions/rows/RLE/checksum
+  and emits standard PNG without dependencies. Keep captured private UI in
+  ignored research. No claim that native touch works until hardware proof.
+  Framebuffer cross-compile passed; actual packer ASan/UBSan16000row cases,
+  decoder corrupt/incomplete records and PNG exact pixels/CRC passed.
+- Next CI0104/0105, temporary peridotspi=4,sweetfbshot=60,sweetdiagreset=90,
+  existing sweethidtest may keep UI awake. No questions/physical tests while
+  user is absent. Power and touch candidates below remain uncommitted.
 
 ### Deferred power candidate (NOT committed or booted)
 

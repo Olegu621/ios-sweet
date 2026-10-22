@@ -1,0 +1,131 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -96,6 +96,7 @@
+ 	IOWorkLoop         *fWorkLoop;
+ 	IOTimerEventSource *fVsync;
+ 	uint64_t            fVsyncCount;
++	uint64_t            fShotDeadline; /* optional, one-shot console capture */
+ 
+ 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
+ 
+@@ -122,6 +123,7 @@
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec);
++	void diagnosticShot(void);
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+@@ -196,6 +198,12 @@
+ 	uint32_t hz = 10;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
++	fShotDeadline = 0;
++	uint32_t shot = 0;
++	PE_parse_boot_argn("sweetfbshot", &shot, sizeof(shot));
++	if (shot && shot <= 3600) {
++		clock_interval_to_deadline(shot, NSEC_PER_SEC, &fShotDeadline);
++	}
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -213,6 +221,10 @@
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
++	bool shot = fb->fShotDeadline && now >= fb->fShotDeadline;
++	if (shot) {
++		fb->fShotDeadline = 0;
++	}
+ 	uint64_t values[6] = {
+ 		(uint32_t)count, (uint32_t)(count >> 32),
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+@@ -240,6 +252,9 @@
+ 				}
+ 			}
+ 		}
++		if (shot) {
++			fb->diagnosticShot();
++		}
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+ 	}
+@@ -257,7 +272,78 @@
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 	}
++	if (shot) {
++		fb->diagnosticShot();
++	}
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++}
++
++/* Small read-only diagnostic frame in the existing console log. RGB332
++ * raw/RLE rows keep each IOLog line under400bytes; no new disk area. */
++static bool
++sweet_fb_shot_pack(const uint8_t *row, unsigned n, char *raw, unsigned rawcap,
++    char *rle, unsigned rlecap, unsigned *rlelen)
++{
++	static const char hex[] = "0123456789abcdef";
++	if (!row || !raw || !rle || !rlelen || !n || n > 160 ||
++	    rawcap < 2 * n + 1 || rlecap < 4 * n + 1) {
++		return false;
++	}
++	for (unsigned x = 0; x < n; ++x) {
++		raw[2 * x] = hex[row[x] >> 4];
++		raw[2 * x + 1] = hex[row[x] & 15];
++	}
++	raw[2 * n] = 0;
++	unsigned at = 0;
++	for (unsigned x = 0; x < n;) {
++		unsigned run = 1;
++		while (x + run < n && row[x + run] == row[x]) {
++			++run;
++		}
++		rle[at++] = hex[run >> 4];
++		rle[at++] = hex[run & 15];
++		rle[at++] = hex[row[x] >> 4];
++		rle[at++] = hex[row[x] & 15];
++		x += run;
++	}
++	rle[at] = 0;
++	*rlelen = at;
++	return true;
++}
++
++void
++AppleCLCD::diagnosticShot(void)
++{
++	const unsigned width = 160;
++	if (!fWidth || !fHeight || fWidth > 16384 || fHeight > 16384 ||
++	    fRowBytes < (uint64_t)fWidth * 4 || !fPixels) {
++		return;
++	}
++	unsigned height = (unsigned)(((uint64_t)fHeight * width + fWidth - 1) / fWidth);
++	if (!height || height > 512) {
++		return;
++	}
++	uint8_t row[160];
++	char raw[321], rle[641];
++	uint32_t sum = 2166136261u;
++	IOLog("SWEET SHOT begin %u %u rgb332 power=%u\n", width, height, !fPowerOff);
++	for (unsigned y = 0; y < height; ++y) {
++		unsigned sy = (unsigned)((uint64_t)y * fHeight / height);
++		volatile uint32_t *pixels = (volatile uint32_t *)(fPixels + (uint64_t)sy * fRowBytes);
++		for (unsigned x = 0; x < width; ++x) {
++			unsigned sx = (unsigned)((uint64_t)x * fWidth / width);
++			uint32_t p = pixels[sx];
++			row[x] = (uint8_t)(((p >> 16) & 0xe0) | ((p >> 11) & 0x1c) | ((p >> 6) & 3));
++			sum = (sum ^ row[x]) * 16777619u;
++		}
++		unsigned rlelen = 0;
++		if (!sweet_fb_shot_pack(row, width, raw, sizeof(raw), rle, sizeof(rle), &rlelen)) {
++			return;
++		}
++		bool use_rle = rlelen < 2 * width;
++		IOLog("SWEET SHOT row %u %c %s\n", y, use_rle ? 'R' : 'P', use_rle ? rle : raw);
++	}
++	IOLog("SWEET SHOT end %08x\n", sum);
+ }
+ 
+ void
