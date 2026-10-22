@@ -63,12 +63,17 @@ shim run whose log is read back over adb.**
    the complete 18 byte sense data, which is the key diagnostic.
 
 ### Ready to use artefacts
-- `xnu/kernel-0089peridot` = CI 39713483351 (success) = patches up to 0089
-  (0089 = correct UIC offsets + fDeviceInit QUERY + PA_PWRMODE change).
+- `xnu/kernel-0089peridot` = CI **39715795688** (success) = patches up to 0089:
+  0089 = correct UIC offsets (0x90/0x94/0x98/0x9c) + the reference init order
+  (NOP OUT -> fDeviceInit QUERY -> device/configuration descriptor ->
+  PA_PWRMODE = 0x11) + the sense data dumped at its real offset.
 - `shim/out/payload-0053p.bin` + `shim/out/shim-boot-0053p.img` = that kernel with
   peridot-high.adt and the 0052p cmdline.
-- `shim/out/shim-boot.img` = the diagnostic shim (no payload): runs the UFS
-  candidates, writes the log into the cache partition, resets into the recovery.
+- `shim/out/shim-diag.img` = the diagnostic shim (no payload): runs the UFS
+  candidates (in the reference order, before any SCSI command), writes the log
+  with the full sense data into the cache partition, resets into the recovery.
+  `fastboot boot shim/out/shim-diag.img`, wait ~40 s, then
+  `adb shell 'dd if=/dev/block/sda29 bs=4096 skip=32764 count=4'`.
   NOTE: the log buffer was 16 KiB but the shim's `data` buffer was 8 KiB - the
   overflow hung the phone (fixed now: `data[4 * BLOCK]`).
 
