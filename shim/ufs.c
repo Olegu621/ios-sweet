@@ -600,14 +600,17 @@ static void ufs_power_mode_experiment(void)
 	dme_get(PA_PWRMODE, &v);
 	log_num("pwrmode_before", v);
 
-	try_tur("before");
-
-	/* C1: the reference probe order: NOP OUT, fDeviceInit, descriptor,
-	 * then the power mode change. */
+	/*
+	 * The reference driver order: NOP OUT, the fDeviceInit handshake,
+	 * the descriptors, the power mode change - and only then the first
+	 * SCSI command.  The first TUR is kept for the record but comes
+	 * after the init sequence, because a refused command may leave the
+	 * device in a state where it refuses everything.
+	 */
 	nop_out();
 	fdeviceinit_handshake();
-	read_descriptor(0x00, 0x40);	/* the device descriptor */
-	read_descriptor(0x01, 0x20);	/* the configuration descriptor */
+	read_descriptor(0x00, 0x40);		/* the device descriptor */
+	read_descriptor(0x01, 0x20);		/* the configuration descriptor */
 	dme_set(PA_RXGEAR, gear_rx);
 	dme_set(PA_ACTIVERXDATALANES, lanes_rx);
 	dme_set(PA_RXTERMINATION, 1);
