@@ -99,6 +99,30 @@
   return -> disk log pull. It waits until recovery uptime >=20 s: early recovery
   reconfigures its USB gadget and an immediate pull can fail with "error: closed".
 
+### 0091 actual UI log and current GUI blocker
+
+- `research/diagnostics-20261022/boot-0091-ui.txt`: 137808 bytes, flush #78.
+  Logical display 1125x2436, BGRA surfaces, **four real completed framebuffer
+  presents**. No AppleM2ScalerCSCDriver loop. User sees Apple logo. No kernel
+  panic. The framebuffer-size hypothesis is confirmed by this A/B result.
+- SpringBoard main thread is blocked in `__LSCopyServerStore` -> synchronous
+  NSXPC reply wait, via `LaunchServices::Database::Context::_get` and
+  `LSApplicationRecord` construction. Another SpringBoard thread waits in the
+  same LaunchServices context while FrontBoard clears expired app records.
+  This is the same wait in 0090, independent of the now-fixed scaler problem.
+- Exact shared-cache symbolication files: `samples-0091-symbolized.txt`,
+  `samples-0090-symbolized.txt`; ipsw v3.1.739 in local ipsw-tool/. The cache view
+  is symlinked from the read-only-mounted local v1 HFS image; main cache and
+  symbols file are regular copies in dyld-cache/ because ipsw mishandles an
+  absolute symlink for the initial cache argument.
+- **Next diagnostic boot must include lsd** in sweetsample. The current logs
+  sampled only SpringBoard/backboardd, so they identify the waiting client but
+  not the server's blocking operation. Also sample containermanagerd and
+  mobileactivationd if space permits. Do not patch LaunchServices blindly.
+- 0092 CI **39728179094** in progress. Phone is back in recovery after the user
+  physically entered fastboot and the host read the 0091 disk log. Ready for
+  the controlled-panic capture/reset test as soon as the artifact is ready.
+
 ### Peripheral facts gathered read-only in recovery
 
 - SM8635 DWC3 is **DWC_usb31**: GSNPSID 0x33313130; not sweet's 0x5533320a.
