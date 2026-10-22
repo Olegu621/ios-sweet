@@ -142,14 +142,14 @@
 +	return pg_base + (ch < 2 ? ch * 0x80 : 0x1000);
 +}
 +
-+/* Leave global translation and all existing mappings intact. If SIDb6 is
++/* Leave global translation and all existing mappings intact. If the ring/data SID is
 + * unmatched/faulting, install one exact-ID bypass in an unused SMR before
 + * issuing any DMA. Only this kernel driver can submit GPI descriptors. */
 +static bool
-+pg_smmu_ready(void)
++pg_smmu_ready(unsigned sid)
 +{
 +	vm_offset_t smmu = ml_io_map(0x15000000, 0x1000);
-+	if (!smmu) {
++	if (!smmu || (sid != 0xb6 && sid != 0xa3)) {
 +		return false;
 +	}
 +	uint32_t cr0 = pg_rd(smmu, 0), id0 = pg_rd(smmu, 0x20);
@@ -167,18 +167,18 @@
 +		if (!valid && free_slot == 0xffff) {
 +			free_slot = i;
 +		}
-+		if (valid && ((0xb6u & ~mask) == ((smr & 0xffff) & ~mask))) {
++		if (valid && ((sid & ~mask) == ((smr & 0xffff) & ~mask))) {
 +			++matches;
 +			bypass = ((s2cr >> 16) & 3) == 1;
-+			printf("PERIDOT GPI: SIDb6 slot%u SMR=%#x S2CR=%#x\n", i, smr, s2cr);
++			printf("PERIDOT GPI: SID%#x slot%u SMR=%#x S2CR=%#x\n", sid, i, smr, s2cr);
 +		}
 +	}
 +	bool ok = matches == 1 ? bypass : matches == 0 && !(cr0 & (1u << 10));
-+	printf("PERIDOT GPI: SMMU existing physical bypass=%d matches=%u CR0=%#x\n", ok, matches, cr0);
++	printf("PERIDOT GPI: SMMU SID%#x existing physical bypass=%d matches=%u CR0=%#x\n", sid, ok, matches, cr0);
 +	if (ok) {
 +		return true;
 +	}
-+	/* Hardware0100: CR0=2b0406,110SMRs, no SIDb6 match, first free5.
++	/* Hardware0100: CR0=2b0406,110SMRs, no SIDb6 match, first free5. Data uses wrapper SIDa3.
 +	 * Never replace a live mapping or use the extended-ID encoding blindly. */
 +	if (matches || free_slot == 0xffff || (cr0 & 8)) {
 +		return false;
@@ -189,14 +189,14 @@
 +		return false;
 +	}
 +	pg_wr(smmu, co, 1u << 16); /* exact stream physical bypass */
-+	pg_wr(smmu, so, 0x800000b6u);
-+	if (pg_rd(smmu, so) != 0x800000b6u || pg_rd(smmu, co) != (1u << 16)) {
++	pg_wr(smmu, so, 0x80000000u | sid);
++	if (pg_rd(smmu, so) != (0x80000000u | sid) || pg_rd(smmu, co) != (1u << 16)) {
 +		pg_wr(smmu, so, oldsmr);
 +		pg_wr(smmu, co, olds2cr);
-+		printf("PERIDOT GPI: SIDb6 mapping readback failed; DMA withheld\n");
++		printf("PERIDOT GPI: SID mapping readback failed; DMA withheld\n");
 +		return false;
 +	}
-+	printf("PERIDOT GPI: SIDb6 exact physical bypass in free slot%u; all other entries unchanged\n", free_slot);
++	printf("PERIDOT GPI: SID%#x exact physical bypass in free slot%u; all other entries unchanged\n", sid, free_slot);
 +	return true;
 +}
 +
@@ -315,7 +315,7 @@
 +			break;
 +		}
 +	}
-+	if (!found || !pg_smmu_ready()) {
++	if (!found || (!pg_smmu_ready(0xb6) || !pg_smmu_ready(0xa3))) {
 +		printf("PERIDOT GPI: no idle APPS instance or physical mapping; DMA withheld\n");
 +		return false;
 +	}

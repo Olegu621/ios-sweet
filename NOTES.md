@@ -205,7 +205,14 @@ sensor. The recovery's real Goodix driver registers that input device.
   GPII_CHAN_DIR), added actual ring-config checks for direction, sizes, base
   upper bits, pairing and event doorbell (ASan/UBSan PASS). Initial CI
   39767566809/commit2c7b6cd is superseded; do not boot that artifact.
-- Next: corrected CI0101, MAC-fixed ADT + safe shim, peridotspi=4 sweetdiagreset=45
+- Additional exact data-path review: spi_geni_map_buf maps data through
+  mas->wrapper_dev=dev->parent (QUP0 SIDa3), while GPI rings use SIDb6.
+ 0101 now checks/prepares BOTH exact streams, preserving live translations.
+  Actual SMMU harness also passes separatea3 and pairedb6/a3 free-slot cases.
+  Corrected-direction CI39767730740/commit857ce6a succeeded but is also
+  superseded BEFORE BOOT because it did not guard the data SID. Do not use
+  earlier0101 artifacts; only the latest commit contains both checks.
+- Next: latest CI0101, MAC-fixed ADT + safe shim, peridotspi=4 sweetdiagreset=45
   sweetpanicreset=1; inspect GPI init, loopback, version. Hardware pending.
   Physical finger test unavailable. Touch candidate and HID geometry remain
   ignored/uncommitted until transport/Goodix initialization is verified.
