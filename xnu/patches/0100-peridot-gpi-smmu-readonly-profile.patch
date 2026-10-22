@@ -1,0 +1,70 @@
+--- a/bsd/dev/sweet_spi_peridot.c
++++ b/bsd/dev/sweet_spi_peridot.c
+@@ -37,6 +37,51 @@
+ 	__asm__ volatile("dsb osh" ::: "memory");
+ }
+ 
++/* Read-only DMA readiness snapshot. GPI DT resource a00000 includes an
++ * EE offset10000: msm_gpi subtracts it before applying GPII register offsets.
++ * Only dynamic APPS GPIIs1..4 are inspected; static GPII0 is untouched. */
++static void
++tp_dma_profile(void)
++{
++	vm_offset_t gpi = ml_io_map(0xa00000, 0x60000);
++	vm_offset_t smmu = ml_io_map(0x15000000, 0x1000);
++	if (!gpi || !smmu) {
++		printf("PERIDOT DMA: profile map failed\n");
++		return;
++	}
++	for (unsigned i = 1; i <= 4; ++i) {
++		unsigned b = 0x10000 + 0x4000 * i;
++		printf("PERIDOT DMA: GPII%u TX=%#x RX=%#x EV=%#x irq=%#x scratch=%#x/%#x\n",
++		    i, tp_rd(gpi, b), tp_rd(gpi, b + 0x80), tp_rd(gpi, b + 0x1000),
++		    tp_rd(gpi, b + 0x3080), tp_rd(gpi, b + 0x60), tp_rd(gpi, b + 0xe0));
++	}
++	uint32_t cr0 = tp_rd(smmu, 0), id0 = tp_rd(smmu, 0x20), id1 = tp_rd(smmu, 0x24);
++	unsigned count = id0 & 0xff, free_slot = 0xffff, matches = 0;
++	printf("PERIDOT DMA: SMMU CR0=%#x ID0=%#x ID1=%#x SMRs=%u SID=0xb6\n",
++	    cr0, id0, id1, count);
++	if (!(id0 & (1u << 27)) || !count || id0 == 0xffffffffu) {
++		return;
++	}
++	for (unsigned i = 0; i < count; ++i) {
++		uint32_t smr = tp_rd(smmu, 0x800 + 4 * i), s2cr = tp_rd(smmu, 0xc00 + 4 * i);
++		bool exid = (cr0 & 8) != 0;
++		bool valid = exid ? (s2cr & 0x400) != 0 : (smr & 0x80000000u) != 0;
++		unsigned mask = (smr >> 16) & (exid ? 0xffff : 0x7fff);
++		if (!valid) {
++			if (free_slot == 0xffff) {
++				free_slot = i;
++			}
++			continue;
++		}
++		if ((0xb6u & ~mask) == ((smr & 0xffff) & ~mask)) {
++			++matches;
++			printf("PERIDOT DMA: SID0xb6 match slot%u SMR=%#x S2CR=%#x\n", i, smr, s2cr);
++		}
++	}
++	printf("PERIDOT DMA: matches=%u first-free=%u; no DMA/IOMMU writes performed\n",
++	    matches, free_slot);
++}
++
+ static bool
+ tp_clear(vm_offset_t b, unsigned off, uint32_t mask)
+ {
+@@ -218,6 +263,15 @@
+ {
+ 	uint32_t probe = 0;
+ 	PE_parse_boot_argn("peridotspi", &probe, sizeof(probe));
++	if (probe == 3) {
++		tp_gcc = ml_io_map(0x100000, 0x60000);
++		if (!tp_gcc || !tp_clocks()) {
++			printf("PERIDOT DMA: clock validation failed\n");
++			return;
++		}
++		tp_dma_profile();
++		return;
++	}
+ 	if (probe != 1) {
+ 		return;
+ 	}

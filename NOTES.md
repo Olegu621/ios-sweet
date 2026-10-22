@@ -142,6 +142,35 @@ sensor. The recovery's real Goodix driver registers that input device.
 - User has left home: continue autonomously, ask no questions, no physical
   interaction available. Record physical touch/UI tests as pending.
 
+### IMPORTANT: exact SPI driver correction / 0100 readiness profile
+
+- Recovery actually binds **spi-msm-geni.ko**. Downloaded exact source
+  linux-ref/peridot-spi-msm-geni.c from MiCode peridot-u-oss, not the adjacent
+  generic spi-geni-qcom.c used earlier. Disassembly spi-msm-geni-disasm.txt.
+  Exact driver explicitly rejects FIFO when IF_DISABLE=1 and GPI channels
+  absent; it requires GPI DMA in this mode. Earlier generic-driver fallback
+  claims above are superseded. Exact CS_TOGGLE is BIT0, not generic BIT1;
+  fix when implementing the next functional transport. No opcode guessing.
+- CI0099 **39764463256 succeeded**, commitccb4a1c; kernel SHA256SUMS passed.
+  Temporary shim-boot-0099-loop.img is running45-second loopback/capture
+  (no manual interaction). Inspect cycle-0099-loop/console.txt next.
+- 0100 adds explicit peridotspi=3 readiness snapshot: enables already
+  validated GCC clocks, reads dynamic APPS GPIIs1..4, SMMU CR0/ID0/ID1 and
+  SMR/S2CR entries matching GPI SID0xb6; no DMA, GPI control or IOMMU writes.
+  Local syntax compile passed. Next CI0100 and45-second automatic capture.
+- GPI live DT reg=a00000/60000, ee-offset10000. Exact msm_gpi.c subtracts
+  that offset before applying register offsets: contexts are mapped reg +
+  (10000 +4000*i), NOT reg +(20000 +4000*i). Dynamic GPII mask1e; leave
+  static GPII0 untouched. TX/RX SE4, protocol1, 64TREs, priority2.
+- Downloaded exact msm_gpi.c/msm_gpi_mmio.h, include/linux/msm_gpi.h to
+  linux-ref/peridot-*; avoid assuming adjacent mainline gpi.c is identical.
+  SMMU qsmmu-v500@15000000, GPI SIDb6, SE internal DMA SIDa3. First inspect
+  inherited stream state, prefer existing bypass if valid; never globally
+  disable or reset the SMMU/display/UFS streams.
+- recovery-cmd-db.txt confirms ldob13 resource42000 and ldob23 resource42800;
+  aux [01 46]/[01 50]. Read-only PMIC debug attempts returned XX; do not
+  interpret as actual rail voltage/off. Debug cursors restored0/1.
+
 ### Prepared follow-up (touch candidate (deferred, to rebase after FIFO fix), NOT YET committed or booted)
 
 - research/diagnostics-20261022/0099-peridot-goodix-touch-candidate.patch;
