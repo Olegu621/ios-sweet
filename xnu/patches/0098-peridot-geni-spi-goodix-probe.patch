@@ -1,0 +1,367 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_spmi_peridot.c		standard
++bsd/dev/sweet_spi_peridot.c		standard
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -54,6 +54,7 @@
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_peridot_keys_init(void);
++extern void sweet_peridot_spi_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ 
+@@ -1113,6 +1114,7 @@
+ 		sweet_usb_probe();
+ 	} else {
+ 		sweet_peridot_keys_init();
++		sweet_peridot_spi_init();
+ 		printf("SWEET PERIPHERALS: SM8635; SM7150 touch/USB probes withheld\n");
+ 	}
+ 	return 0;
+--- /dev/null
++++ b/bsd/dev/sweet_spi_peridot.c
+@@ -0,0 +1,336 @@
++/* Peridot SE4 SPI / Goodix BerlinD diagnostic. Register definitions follow
++ * Linux spi-geni-qcom, qcom-geni-se, Goodix Berlin and MiCode gcc-cliffs.
++ * Explicit peridotspi=1 only: no firmware writes, IRQ handler or reset.
++ * Run after UFS logging. FIFO transfers avoid DMA/SMMU dependencies.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++void sweet_peridot_spi_init(void);
++
++#define TP_MAX 1024u
++#define TP_RCG 0x183c8u
++#define TP_CTRL(n) (0x1000u * (n))
++#define TP_IO(n) (TP_CTRL(n) + 4u)
++#define TP_ERROR (0x0eu | (3u << 24) | (3u << 28))
++static vm_offset_t tp_se, tp_gcc, tp_gpio;
++static unsigned tp_depth;
++static uint8_t tp_tx[TP_MAX + 8], tp_rx[TP_MAX + 8], tp_info[TP_MAX];
++
++static uint32_t
++tp_rd(vm_offset_t b, unsigned off)
++{
++	uint32_t v = *(volatile uint32_t *)(b + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++tp_wr(vm_offset_t b, unsigned off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(b + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static bool
++tp_clear(vm_offset_t b, unsigned off, uint32_t mask)
++{
++	for (unsigned i = 0; i < 10000; ++i) {
++		if (!(tp_rd(b, off) & mask)) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static bool
++tp_clocks(void)
++{
++	uint32_t vote = tp_rd(tp_gcc, 0x52008);
++	tp_wr(tp_gcc, 0x52008, vote | (1u << 20) | (1u << 21) | (1u << 26));
++	uint32_t dfs = tp_rd(tp_gcc, TP_RCG + 0x14);
++	uint32_t cfg = tp_rd(tp_gcc, TP_RCG + (dfs & 1 ? 0x1c : 4));
++	printf("PERIDOT SPI: vote=%#x DFS=%#x CFG0=%#x CBCR=%#x\n",
++	    tp_rd(tp_gcc, 0x52008), dfs, cfg, tp_rd(tp_gcc, 0x183bc));
++	if (dfs & 1) {
++		/* Keep firmware DFS tables intact. Level0 must be XO / 1. */
++		if ((cfg & 0x371f) != 1) {
++			printf("PERIDOT SPI: DFS level0 is not XO/1; transfer withheld\n");
++			return false;
++		}
++	} else {
++		tp_wr(tp_gcc, TP_RCG + 4, (cfg & ~(0x371fu | (1u << 20))) | 1);
++		tp_wr(tp_gcc, TP_RCG, tp_rd(tp_gcc, TP_RCG) | 1);
++		if (!tp_clear(tp_gcc, TP_RCG, 1)) {
++			return false;
++		}
++	}
++	return tp_clear(tp_gcc, 0x23000, 1u << 31) &&
++	       tp_clear(tp_gcc, 0x23004, 1u << 31) &&
++	       tp_clear(tp_gcc, 0x183bc, 1u << 31);
++}
++
++/* Abort only a command this driver submitted; no foreign transaction reset. */
++static void
++tp_abort(void)
++{
++	tp_wr(tp_se, 0x604, 2);
++	(void)tp_clear(tp_se, 0x40, 1);
++	tp_wr(tp_se, 0x618, 0xffffffffu);
++}
++
++static bool
++tp_command(unsigned opcode)
++{
++	if (tp_rd(tp_se, 0x40) & 1) {
++		return false;
++	}
++	tp_wr(tp_se, 0x618, 0xffffffffu);
++	tp_wr(tp_se, 0x600, opcode << 27);
++	for (unsigned i = 0; i < 50000; ++i) {
++		uint32_t irq = tp_rd(tp_se, 0x610);
++		if (irq & TP_ERROR) {
++			printf("PERIDOT SPI: command%u error=%#x\n", opcode, irq);
++			break;
++		}
++		if ((irq & 1) && !(tp_rd(tp_se, 0x40) & 1)) {
++			tp_wr(tp_se, 0x618, irq);
++			return true;
++		}
++		delay(1);
++	}
++	printf("PERIDOT SPI: command%u failed IRQ=%#x status=%#x\n",
++	    opcode, tp_rd(tp_se, 0x610), tp_rd(tp_se, 0x40));
++	tp_abort();
++	return false;
++}
++
++static bool
++tp_transfer(unsigned n)
++{
++	unsigned tx = 0, rx = 0;
++	bool ok = false;
++	if (!n || n > sizeof(tp_tx) || (tp_rd(tp_se, 0x40) & 0x1001)) {
++		return false;
++	}
++	if (!tp_command(8)) { /* CS assert */
++		return false;
++	}
++	tp_wr(tp_se, 0x618, 0xffffffffu);
++	tp_wr(tp_se, 0x26c, n);
++	tp_wr(tp_se, 0x270, n);
++	/* FIFO-mode TX|RX (1|2), keep CS until the explicit deassert. */
++	tp_wr(tp_se, 0x600, (3u << 27) | 4u);
++	for (unsigned iter = 0; iter < 50000; ++iter) {
++		uint32_t used = tp_rd(tp_se, 0x800) & 0x0fffffffu;
++		if (used > tp_depth) {
++			break;
++		}
++		for (unsigned slots = tp_depth - used; slots && tx < n; --slots) {
++			uint32_t word = 0;
++			for (unsigned k = 0; k < 4 && tx < n; ++k) {
++				word |= (uint32_t)tp_tx[tx++] << (8 * k);
++			}
++			tp_wr(tp_se, 0x700, word);
++		}
++		uint32_t status = tp_rd(tp_se, 0x804);
++		unsigned words = status & 0x01ffffffu;
++		if (words > tp_depth || words > (n - rx + 3) / 4) {
++			break;
++		}
++		for (unsigned j = 0; j < words; ++j) {
++			uint32_t word = tp_rd(tp_se, 0x780);
++			unsigned bytes = 4;
++			if ((status & 0x80000000u) && j + 1 == words) {
++				unsigned last = (status >> 28) & 7;
++				if (last && last < 4) {
++					bytes = last;
++				}
++			}
++			for (unsigned k = 0; k < bytes && rx < n; ++k) {
++				tp_rx[rx++] = (uint8_t)(word >> (8 * k));
++			}
++		}
++		uint32_t irq = tp_rd(tp_se, 0x610);
++		if (irq & TP_ERROR) {
++			break;
++		}
++		if ((irq & 1) && tx == n && rx == n && !(tp_rd(tp_se, 0x40) & 1)) {
++			ok = true;
++			break;
++		}
++		/* FIFO watermark status is level-triggered. Preserve CMD_DONE. */
++		tp_wr(tp_se, 0x618, irq & ((1u << 26) | (1u << 27) | (1u << 30)));
++		delay(1);
++	}
++	if (!ok) {
++		printf("PERIDOT SPI: transfer len=%u tx=%u rx=%u IRQ=%#x status=%#x\n",
++		    n, tx, rx, tp_rd(tp_se, 0x610), tp_rd(tp_se, 0x40));
++		tp_abort();
++	}
++	bool released = tp_command(9);
++	return ok && released;
++}
++
++static bool
++tp_read(uint32_t addr, void *out, unsigned n)
++{
++	if (!n || n > TP_MAX || !out) {
++		return false;
++	}
++	memset(tp_tx, 0xff, n + 8);
++	tp_tx[0] = 0xf1;
++	for (unsigned i = 0; i < 4; ++i) {
++		tp_tx[i + 1] = (uint8_t)(addr >> (24 - 8 * i));
++	}
++	if (!tp_transfer(n + 8)) {
++		return false;
++	}
++	memcpy(out, tp_rx + 8, n);
++	return true;
++}
++
++static bool
++tp_checksum(const uint8_t *b, unsigned n)
++{
++	uint32_t sum = 0;
++	if (n < 2) {
++		return false;
++	}
++	for (unsigned i = 0; i < n - 2; ++i) {
++		sum += b[i];
++	}
++	return (uint16_t)sum == (uint16_t)(b[n - 2] | b[n - 1] << 8);
++}
++
++void
++sweet_peridot_spi_init(void)
++{
++	uint32_t probe = 0;
++	PE_parse_boot_argn("peridotspi", &probe, sizeof(probe));
++	if (probe != 1) {
++		return;
++	}
++	tp_gcc = ml_io_map(0x100000, 0x60000);
++	tp_gpio = ml_io_map(0xf100000, 0x82000);
++	if (!tp_gcc || !tp_gpio || !tp_clocks()) {
++		printf("PERIDOT SPI: clock/map validation failed\n");
++		return;
++	}
++	tp_se = ml_io_map(0xa90000, 0x4000);
++	if (!tp_se) {
++		return;
++	}
++	uint32_t fw = tp_rd(tp_se, 0x68), status = tp_rd(tp_se, 0x40);
++	uint32_t params = tp_rd(tp_se, 0xe24);
++	uint32_t rxparams = tp_rd(tp_se, 0xe28);
++	tp_depth = (params >> 16) & 0xff;
++	printf("PERIDOT SPI: FW=%#x status=%#x HW0=%#x HW1=%#x IF=%#x reset=%#x/%#x irq=%#x/%#x\n",
++	    fw, status, params, rxparams, tp_rd(tp_se, 0x64),
++	    tp_rd(tp_gpio, TP_CTRL(128)), tp_rd(tp_gpio, TP_IO(128)),
++	    tp_rd(tp_gpio, TP_CTRL(129)), tp_rd(tp_gpio, TP_IO(129)));
++	if (((fw >> 8) & 0xff) != 1 || (status & 0x1001) ||
++	    tp_depth < 2 || tp_depth > 256 || ((params >> 24) & 0x3f) != 32 ||
++	    ((rxparams >> 16) & 0xff) != tp_depth ||
++	    ((rxparams >> 24) & 0x3f) != 32) {
++		printf("PERIDOT SPI: unsupported/busy engine; left untouched\n");
++		return;
++	}
++	for (unsigned pin = 16; pin <= 19; ++pin) {
++		/* DT: function1, 6mA, no pull. Peripheral drives its own OE. */
++		uint32_t cfg = tp_rd(tp_gpio, TP_CTRL(pin));
++		tp_wr(tp_gpio, TP_CTRL(pin), (cfg & ~0x3ffu) | 0x84u);
++	}
++	/* GENI initialization, SPI mode0, 8-bit MSB-first, 4 bytes per FIFO word. */
++	tp_wr(tp_se, 0x28, tp_rd(tp_se, 0x28) | 0x7f);
++	tp_wr(tp_se, 0xe30, tp_rd(tp_se, 0xe30) | 0x0f);
++	tp_wr(tp_se, 0x24, 0x7f);
++	tp_wr(tp_se, 0x20, 1);
++	tp_wr(tp_se, 0xe18, 0); /* GSI events off */
++	tp_wr(tp_se, 0xe1c, 0); /* polling, no external IRQ request */
++	tp_wr(tp_se, 0x258, 0); /* DMA mode off */
++	tp_wr(tp_se, 0x614, 0xffffffffu);
++	tp_wr(tp_se, 0x644, 0);
++	tp_wr(tp_se, 0x618, 0xffffffffu);
++	tp_wr(tp_se, 0x648, 0xffffffffu);
++	tp_wr(tp_se, 0x80c, 1);
++	tp_wr(tp_se, 0x810, 0);
++	tp_wr(tp_se, 0x814, tp_depth - 2);
++	uint32_t vector[4];
++	for (unsigned i = 0; i < 4; ++i) {
++		vector[i] = ((8 * i + 7) << 5) | (1u << 4) | (7u << 1);
++	}
++	vector[3] |= 1;
++	tp_wr(tp_se, 0x260, vector[0] | (vector[1] << 10));
++	tp_wr(tp_se, 0x264, vector[2] | (vector[3] << 10));
++	tp_wr(tp_se, 0x284, vector[0] | (vector[1] << 10));
++	tp_wr(tp_se, 0x288, vector[2] | (vector[3] << 10));
++	tp_wr(tp_se, 0x254, 0);
++	tp_wr(tp_se, 0x268, 4); /* bits_per_word - 4 */
++	tp_wr(tp_se, 0x224, 0); /* CPHA */
++	tp_wr(tp_se, 0x230, 0); /* CPOL */
++	tp_wr(tp_se, 0x22c, 0); /* loopback */
++	tp_wr(tp_se, 0x24c, 0); /* CS active low */
++	tp_wr(tp_se, 0x250, 0); /* CS0 */
++	tp_wr(tp_se, 0x25c, tp_rd(tp_se, 0x25c) & ~2u);
++	tp_wr(tp_se, 0x274, 0);
++	tp_wr(tp_se, 0x278, 0);
++	tp_wr(tp_se, 0x7c, 0); /* validated XO DFS level0 */
++	tp_wr(tp_se, 0x48, (2u << 4) | 1u); /* 19.2MHz / 2 = 9.6MHz */
++	/* Drain at most one FIFO, only after confirming idle/no foreign command. */
++	unsigned stale = tp_rd(tp_se, 0x804) & 0x01ffffffu;
++	if (stale > tp_depth) {
++		printf("PERIDOT SPI: invalid stale RX count=%u\n", stale);
++		return;
++	}
++	while (stale--) {
++		(void)tp_rd(tp_se, 0x780);
++	}
++	uint8_t version[28];
++	if (!tp_read(0x10014, version, sizeof(version))) {
++		printf("PERIDOT SPI: Goodix version read failed\n");
++		return;
++	}
++	printf("PERIDOT SPI: version first bytes %02x %02x %02x %02x, checksum=%d\n",
++	    version[0], version[1], version[2], version[3], tp_checksum(version, sizeof(version)));
++	if (!tp_checksum(version, sizeof(version)) || memcmp(version, "BERLIN", 6)) {
++		return;
++	}
++	char product[9];
++	memcpy(product, version + 10, 8);
++	product[8] = 0;
++	printf("PERIDOT SPI: Goodix %s firmware %02x%02x%02x%02x\n",
++	    product, version[18], version[19], version[20], version[21]);
++	if (!tp_read(0x10070, tp_info, 2)) {
++		return;
++	}
++	unsigned length = tp_info[0] | tp_info[1] << 8;
++	if (length < 34 || length > TP_MAX || !tp_read(0x10070, tp_info, length) ||
++	    !tp_checksum(tp_info, length)) {
++		printf("PERIDOT SPI: invalid IC_INFO length=%u/checksum\n", length);
++		return;
++	}
++	unsigned off = 32; /* length + version16 + feature10 + fixed params4 */
++	for (unsigned i = 0; i < 5; ++i) {
++		if (off >= length - 2) {
++			return;
++		}
++		unsigned count = tp_info[off++];
++		off += 2 * count;
++	}
++	if (off + 52 > length - 2) {
++		return;
++	}
++	uint32_t addr = tp_info[off + 44] | (uint32_t)tp_info[off + 45] << 8 |
++	    (uint32_t)tp_info[off + 46] << 16 | (uint32_t)tp_info[off + 47] << 24;
++	printf("PERIDOT SPI: IC_INFO len=%u checksum OK touch=%#x head=%u point=%u; read-only probe complete\n",
++	    length, addr, tp_info[off + 48] | tp_info[off + 49] << 8,
++	    tp_info[off + 50] | tp_info[off + 51] << 8);
++}
++#endif

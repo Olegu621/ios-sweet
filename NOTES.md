@@ -5,7 +5,9 @@
 ## Active handoff (peridot, 2026-10-22, Codex continuation)
 
 **Latest continuation (Codex, after OpenCode): phone is in root recovery.
-SPMI/key patch 0097 is prepared and locally validated; hardware test pending.
+SPMI/key patch 0097 passed its first hardware test: all three buttons
+produce matched down/up events delivered to a live HID client. Native
+Goodix SPI read-only probe 0098 is being prepared.
 This paragraph and the next section override stale device/status claims below.**
 
 ### Corrected touchscreen facts (Codex, confirmed in live recovery)
@@ -74,11 +76,35 @@ sensor. The recovery's real Goodix driver registers that input device.
   match passed. Harness extracting actual selector/read/debounce code passes
   ASan/UBSan: owner preference, PPID, APIDs895/1023, bounds, timeout/denied
   channels, read-only command, bounce and failure release.
-- CI0097 **39757457451 succeeded**, commit79d3507. Downloading/verifying
-  artifact, then build with MAC-fixed ADT
-  + safe shim, use peridot-cycle.py with sweetdiagreset=180 sweetpanicreset=1.
-  Compare PMIC values to recovery and ask user for separate short presses of
-  power/volume up/volume down. No new image booted yet.
+- CI0097 **39757457451 succeeded**, commit79d3507; artifact SHA256SUMS
+  verified. Temporary image shim/out/shim-boot-0097-keys.img uses MAC-fixed
+  ADT and current safe shim; timed capture returned to root recovery.
+- Hardware PASS: cycle-0097-keys/console.txt validates PON type09/RT10,
+  GPIO6 subtype13/mode0/en80/RT01. User pressed power/up/down separately;
+  all have matched down/up messages and SWEET HID events with 1 client.
+  No panic appears in this captured boot. Booted with sweetdiagreset=180.
+  This proves PMIC sampling and HID delivery; user-visible key behavior
+  and long holds still need checking. No permanent boot partition changed.
+- Next: native SE4 SPI diagnostic (explicit peridotspi=1), first read only
+  firmware/IC_INFO. Verify bounded FIFO transfers on host, then CI and a
+  temporary timed boot. Do not feed touch events before transport/checksums
+  and F6 physical-to-logical coordinates are validated.
+
+
+### 0098 native Goodix SPI diagnostic — prepared
+
+- New sweet_spi_peridot.c, called only in SM8635 UFS init after logger/keys;
+  additionally requires explicit peridotspi=1. Diagnostic only: existing
+  Goodix firmware/IC_INFO reads, no reset, firmware/config writes or events.
+- SE4@a90000, cliffs GCC votes/DFS level0 validation, TLMM16..19 function1;
+  PIO/FIFO, mode0, MSB-first8bit, XO/2=9.6MHz, bounded command/data waits.
+  Confirms engine protocol, idle status, FIFO width/depth before setup.
+- Local SPI/UFS syntax cross-compile passed. ASan/UBSan harness extracting
+  actual functions passed all read sizes1..1024, FIFO depth4/partial words,
+  F1+BE32+dummy header, CS sequencing, invalid/busy/timeout/error/bad count,
+  and captured197-byte IC_INFO checksum/corruption.
+- Patch0098 generated; next CI build and timed hardware probe. The untouched
+  stable0092 image remains available; never use old shim diagnostic writers.
 
 
 - Latest OpenCode session was read from its SQLite DB. Its last action was a
