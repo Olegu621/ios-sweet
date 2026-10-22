@@ -674,6 +674,24 @@ static void ufs_power_mode_experiment(void)
 		log_num("ssu_wlun_st", (ocs << 8) | st);
 		try_tur("c5_start_stop_unit");
 	}
+
+	/* C6: a device power cycle: START STOP UNIT with the power down
+	 * condition (0x20) and then with the active one (0x00).  This is
+	 * the UFS level equivalent of the VCC toggle the reference driver
+	 * does with the device. */
+	{
+		static const uint8_t ssu_down[6] = { 0x1e, 0, 0, 0, 0x20, 0 };
+		static const uint8_t ssu_up[6] = { 0x1e, 0, 0, 0, 0x00, 0 };
+		uint32_t ocs = 0, st = 0;
+		uint32_t rc = scsi(0xd0, ssu_down, sizeof(ssu_down), 0, 0, &ocs, &st, 0);
+
+		log_num("ssu_down_rc", rc);
+		log_num("ssu_down_st", (ocs << 8) | st);
+		rc = scsi(0xd0, ssu_up, sizeof(ssu_up), 0, 0, &ocs, &st, 0);
+		log_num("ssu_up_rc", rc);
+		log_num("ssu_up_st", (ocs << 8) | st);
+		try_tur("c6_power_cycle");
+	}
 }
 
 static uint64_t le64(const uint8_t *p)
