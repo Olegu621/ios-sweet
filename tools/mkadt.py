@@ -115,6 +115,13 @@ def build(seed=None, qemu=False, highmem=False):
         # of the A11 that the iPhone X userland expects.
         ('unique-chip-id', struct.pack('<Q', SWEET_ECID)),
         ('chip-id', u32(0x8015)),
+        # Stable synthetic identity, like SWEET_ECID above; these do not
+        # enable either radio. MobileGestalt reads the six-byte data here
+        # before falling back to network-driver matching. Without wifi0,
+        # lsd's built-in app installation identity blocks in that fallback
+        # while seeding the database, holding up SpringBoard.
+        ('mac-address-wifi0', bytes.fromhex('02 53 57 45 45 01')),
+        ('mac-address-bluetooth0', bytes.fromhex('02 53 57 45 45 02')),
         # Security status as on a dev-fused, undemoted board (tuple 0,0,1,1):
         # MobileGestalt reads these from /chosen, and mobileactivationd's
         # DeviceType then takes its native "Hactivation" branch (state

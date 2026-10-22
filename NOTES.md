@@ -131,6 +131,38 @@
   containermanagerd,mobileactivationd. Output `cycle-0092-sample/`.
   Phone needs no manual intervention while this automatic diagnostic runs.
 
+### 0092 automatic UI diagnostic and MobileGestalt blocker
+
+- `cycle-0092-sample/console.txt`: 137111 bytes, seq UINT64_MAX; timer captured
+  after 150 seconds and returned to recovery automatically. No kernel panic.
+  Super first 4 MiB reread after both 0092 tests still exactly matches repaired
+  `super-first4m.after` (`super-after-0092.bin`).
+- `samples-0092-full.txt` and `samples-0092-lsd-symbolized.txt`: lsd main waits
+  in `_LSInstallProgressService performJournalRecovery`; its database clients
+  wait for seeding. Seeding worker calls `GenerateBuiltInAppInstallSessionID`
+  -> MobileInstallation -> MobileGestalt -> MGIOKitSupport semaphore wait.
+- Exact MG cache base is 0x19c555000. Worker waits at +0x274bc, runloop worker
+  at +0x27558. The local standalone libMobileGestalt has IDENTICAL offsets;
+  disassembly `mg-standalone.dis` confirms +0x1c6e8 first reads
+  `/chosen/mac-address-wifi0` as CFData; absent it tries sdio/wlan/wi-fi, then
+  +0x27084 waits for IONetworkController. Its timeout is 5 seconds, repeated
+  during application identity generation. Missing Wi-Fi driver identity is
+  therefore the observed blocking operation; test the ADT fix before assuming
+  an IPC or filesystem deadlock.
+- tools/mkadt.py now adds stable synthetic, locally administered six-byte
+  wifi0 and bluetooth0 identities, consistent with existing synthetic ECID.
+  BT path +0x13864 independently confirms `/chosen/mac-address-bluetooth0`.
+  This supplies identity only, not working radio drivers. ADT parsed/diffed:
+  only those properties plus fresh random-seed changed; Python compile passed.
+- Ready image `shim/out/shim-boot-0092-mac.img`: SAME CI0092 kernel, new
+  `peridot-0092-mac.adt`, sweetdiagreset=180. Sampler now uses the actual
+  16-char p_comm names containermanager,mobileactivation (17-char executable
+  names did not match in previous test). Hardware ADT test PENDING.
+- Before next boot, completing read-only backup of live 16-GiB HFS root into
+  `research/diagnostics-20261022/live-root-0092.img`; recovery has no HFS driver.
+  Initial raw read stopped at 4991 MiB; resumed at exactly that aligned offset
+  with gzip transport, validates final byte count. Do not boot while copying.
+
 ### Peripheral facts gathered read-only in recovery
 
 - SM8635 DWC3 is **DWC_usb31**: GSNPSID 0x33313130; not sweet's 0x5533320a.
@@ -152,8 +184,9 @@
 ### Immediate next actions
 
 1. 0092 CI and hardware panic capture/reset test DONE. Collect the running
-   150-second unattended UI diagnostic, symbolicate lsd server threads, then
-   fix the observed server-side block. No unexplained kernel panic in 0090/0091.
+   150-second unattended UI diagnostic DONE. Finish live-root backup, then
+   boot 0092-mac through peridot-cycle.py and compare lsd/SpringBoard progress.
+   No unexplained kernel panic in 0090/0091/0092 normal boots.
 2. Geometry repair DONE and readback verified. BCB command was temporarily set
    to `boot-recovery` (32 bytes, backup saved) so the safe shim PSCI reset should
    return to recovery automatically. Safe shim boot accepted by fastboot.
