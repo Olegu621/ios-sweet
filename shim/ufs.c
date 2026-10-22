@@ -372,16 +372,22 @@ static uint32_t query(uint8_t opcode, uint8_t idn, uint32_t value, uint32_t *rsp
 	ucd.cmd[3] = ++tag;
 	ucd.cmd[4] = 0x00;			/* command set type / IID */
 	ucd.cmd[5] = opcode == QUERY_OP_READ_FLAG ? QUERY_FUNC_READ : QUERY_FUNC_WRITE;
-	ucd.cmd[16] = opcode;
-	ucd.cmd[17] = idn;
-	ucd.cmd[18] = 0;			/* index */
-	ucd.cmd[19] = 0;			/* selector */
-	ucd.cmd[22] = 0;			/* length */
-	ucd.cmd[23] = 0;
-	ucd.cmd[24] = value >> 24;
-	ucd.cmd[25] = value >> 16;
-	ucd.cmd[26] = value >> 8;
-	ucd.cmd[27] = value;
+	/*
+	 * The query payload starts right behind the 12 byte UPIU header
+	 * (struct utp_upiu_query): opcode, idn, index, selector, reserved,
+	 * length, value.  (The command UPIU has a data length field there,
+	 * the query UPIU does not.)
+	 */
+	ucd.cmd[12] = opcode;
+	ucd.cmd[13] = idn;
+	ucd.cmd[14] = 0;			/* index */
+	ucd.cmd[15] = 0;			/* selector */
+	ucd.cmd[18] = 0;			/* length */
+	ucd.cmd[19] = 0;
+	ucd.cmd[20] = value >> 24;
+	ucd.cmd[21] = value >> 16;
+	ucd.cmd[22] = value >> 8;
+	ucd.cmd[23] = value;
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
 	utrl[0].dw0 = (1u << 28) | (1u << 24);	/* CT=1 (UFS storage), DD=0, I=1 */

@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index b8e580f..67a4c3e 100644
+index b8e580f..5051f44 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -59,10 +59,16 @@ extern void sweet_usb_probe(void);
@@ -98,7 +98,7 @@ index b8e580f..67a4c3e 100644
  	printf("SWEET UFS: DME RESET result 0x%x IS 0x%x\n", r, ufs_rd(REG_IS));
  	if (r != 0xffffffffu) {
  		uint32_t hcs = 0;
-@@ -429,11 +465,159 @@ ufs_link_init(void)
+@@ -429,11 +465,165 @@ ufs_link_init(void)
  		}
  		printf("SWEET UFS: HCS after DME RESET 0x%x\n", hcs);
  	}
@@ -132,16 +132,22 @@ index b8e580f..67a4c3e 100644
 +	ucd->cmd[3] = ++su.tag;
 +	ucd->cmd[4] = 0x00;                     /* command set type / IID */
 +	ucd->cmd[5] = (opcode == 0x05) ? 0x01 : 0x81;   /* query function */
-+	ucd->cmd[16] = opcode;
-+	ucd->cmd[17] = idn;
-+	ucd->cmd[18] = 0;                       /* index */
-+	ucd->cmd[19] = 0;                       /* selector */
-+	ucd->cmd[22] = 0;                       /* length */
-+	ucd->cmd[23] = 0;
-+	ucd->cmd[24] = (uint8_t)(value >> 24);
-+	ucd->cmd[25] = (uint8_t)(value >> 16);
-+	ucd->cmd[26] = (uint8_t)(value >> 8);
-+	ucd->cmd[27] = (uint8_t)value;
++	/*
++	 * The query payload starts right behind the 12 byte UPIU header
++	 * (struct utp_upiu_query), not behind a data length field like the
++	 * command UPIU has: opcode, idn, index, selector, reserved, length,
++	 * value.
++	 */
++	ucd->cmd[12] = opcode;
++	ucd->cmd[13] = idn;
++	ucd->cmd[14] = 0;                       /* index */
++	ucd->cmd[15] = 0;                       /* selector */
++	ucd->cmd[18] = 0;                       /* length */
++	ucd->cmd[19] = 0;
++	ucd->cmd[20] = (uint8_t)(value >> 24);
++	ucd->cmd[21] = (uint8_t)(value >> 16);
++	ucd->cmd[22] = (uint8_t)(value >> 8);
++	ucd->cmd[23] = (uint8_t)value;
 +
 +	/* No data phase: DD = 0, command type 1 (UFS storage device). */
 +	utrd->dw0 = (1u << 28) | (1u << 24);
@@ -152,7 +158,7 @@ index b8e580f..67a4c3e 100644
 +
 +	if (su.cache) {
 +		dma_clean(DMA_UTRL, sizeof(*utrd));
-+		dma_clean(DMA_UCD, 32);
++		dma_clean(DMA_UCD, 24);
 +		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
 +	} else {
 +		dma_sync(DMA_UTRL, sizeof(*utrd));
@@ -259,7 +265,7 @@ index b8e580f..67a4c3e 100644
  static int
  ufs_take_over_host(void)
  {
-@@ -704,6 +888,11 @@ sweet_ufs_init(void)
+@@ -704,6 +894,11 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
