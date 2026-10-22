@@ -103,8 +103,36 @@ sensor. The recovery's real Goodix driver registers that input device.
   actual functions passed all read sizes1..1024, FIFO depth4/partial words,
   F1+BE32+dummy header, CS sequencing, invalid/busy/timeout/error/bad count,
   and captured197-byte IC_INFO checksum/corruption.
-- Patch0098 generated; next CI build and timed hardware probe. The untouched
+- Patch0098 committed8940f93, CI39761394868 is now building (runner queue
+  was about10minutes). Next: artifact verification and 45-second timed probe.
+  Recovery GCC regmap read confirms DFS0 CFG=00000001 at0x183e4; all64
+  words saved in recovery-spi-dfs-table.txt; no GCC registers were written.
+  The untouched
   stable0092 image remains available; never use old shim diagnostic writers.
+
+
+### Prepared follow-up (0099 candidate, NOT YET committed or booted)
+
+- research/diagnostics-20261022/0099-peridot-goodix-touch-candidate.patch;
+  source edits are in the ignored local buildtree. Base SPI source saved as
+  spi.pre0099.c; HID base SweetHID.pre0099.cpp. Do not confuse candidate
+  edits with what CI0098 is building. Wait for0098's hardware result first.
+- Explicit peridotspi=2: fixed8-byte headers/points, checksummed0..10-contact
+  frames, validated event addr10308, IRQ129 polling8ms; only write is F0
+  zero-byte event-status ACK. No reset, firmware/config upload, DMA or IRQs.
+  Unknown types/checksums/IDs/bounds are dropped; transport failure stops
+  poller and releases contacts. Supports finger type0/2, rejects pen/key
+  variable-size packets. Actual recovery module disassembly confirms direct
+  LE16 coordinates at+2/+4, ID at high nibble,8-byte finger stride.
+- HID geometry reads PE_current_console physical dimensions, uses signed
+  centering matching framebuffer and clamps before fixed-point multiplication
+  (avoids negative-shift UB on1220x2712 ->1125x2436 crop).
+- Both source files cross-compiled. ASan/UBSan actual decoder and geometry
+  tests passed:0..10 fingers, truncation, checksum corruption, IDs/duplicates,
+  coordinate bounds, status-only ACK and failure releases, F6 crop edges,
+  original sweet centering and native dimensions. Hardware pending.
+- User asks to simplify: prioritize minimal SPI -> one finger -> lockscreen
+  swipe; keep DMA, platform-wide porting and unrelated peripherals deferred.
 
 
 - Latest OpenCode session was read from its SQLite DB. Its last action was a
