@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index b8e580f..6569310 100644
+index b8e580f..889de05 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -59,10 +59,16 @@ extern void sweet_usb_probe(void);
@@ -23,40 +23,38 @@ index b8e580f..6569310 100644
  #define REG_UTRLBA      0x50
  #define REG_UTRLBAU     0x54
  #define REG_UTRLDBR     0x58
-@@ -151,9 +157,18 @@ dma_clean(uint32_t off, uint32_t len)
+@@ -151,8 +157,29 @@ dma_clean(uint32_t off, uint32_t len)
   * One SCSI command in slot 0, data (if any) to/from the bounce buffer
   * (to the device when write is set). Returns 0 or an errno.
   */
-+static int ufs_scsi_retry(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write);
++static int ufs_scsi_once(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write);
 +
  static int
  ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
- {
-+	return ufs_scsi_retry(cdb, cdb_len, len, write);
++{
++	/*
++	 * After a device reset the first command comes back with a unit
++	 * attention ("power on, reset or bus device reset occurred", ASC
++	 * 0x29 in the sense data) and only the retry gets through - the
++	 * reference driver does the same.
++	 */
++	for (int attempt = 0; ; attempt++) {
++		int rc = ufs_scsi_once(cdb, cdb_len, len, write);
++
++		if (!rc || attempt || write) {
++			return rc;
++		}
++		printf("SWEET UFS: command 0x%02x refused, retrying\n", cdb[0]);
++	}
 +}
 +
 +static int
-+ufs_scsi_retry(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
-+{
-+	bool ucs_retried = false;
++ufs_scsi_once(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ {
  	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
  	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
- 	uint64_t ucd_pa = su.dma_pa + DMA_UCD, bounce_pa = su.dma_pa + DMA_BOUNCE;
-@@ -255,13 +270,31 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
- 
- 	uint32_t ocs = utrd->dw2 & 0xff;
+@@ -257,11 +284,18 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
  	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
-+		/*
-+		 * After a device reset the first command comes back with a
-+		 * unit attention ("power on, reset or bus device reset
-+		 * occurred", ASC 0x29 in the sense data) and only the retry
-+		 * gets through.  The reference driver does the same.
-+		 */
-+		if (!write && !ucs_retried) {
-+			ucs_retried = true;
-+			printf("SWEET UFS: command 0x%02x refused, retrying\n", cdb[0]);
-+			return ufs_scsi_retry(cdb, cdb_len, len, write);
-+		}
  		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
  		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
 -		printf("SWEET UFS: upiu %02x %02x %02x %02x %02x %02x %02x %02x sense %02x %02x %02x %02x %02x %02x %02x %02x\n",
@@ -79,7 +77,7 @@ index b8e580f..6569310 100644
  		printf("SWEET UFS: cdb %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x utrd %08x %08x %08x\n",
  		    ucd->cmd[16], ucd->cmd[17], ucd->cmd[18], ucd->cmd[19],
  		    ucd->cmd[20], ucd->cmd[21], ucd->cmd[22], ucd->cmd[23],
-@@ -374,22 +407,25 @@ ufs_find_partition(const char *want)
+@@ -374,22 +408,25 @@ ufs_find_partition(const char *want)
   * Returns the full UICCMDARG0 or 0xffffffff on timeout.
   */
  static uint32_t
@@ -111,7 +109,7 @@ index b8e580f..6569310 100644
  		}
  		delay(1);
  	}
-@@ -399,39 +435,319 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
+@@ -399,39 +436,319 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
  }
  
  /*
@@ -457,7 +455,7 @@ index b8e580f..6569310 100644
  }
  
  static int
-@@ -707,11 +1023,20 @@ sweet_ufs_init(void)
+@@ -707,11 +1024,20 @@ sweet_ufs_init(void)
  	if (!error) {
  		error = ufs_link_init();
  	}
