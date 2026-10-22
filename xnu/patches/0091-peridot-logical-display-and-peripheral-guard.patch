@@ -1,0 +1,72 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -983,6 +983,33 @@
+ 	.d_type       = D_DISK,
+ };
+ 
++/* The compiled key/touch/USB probes below use SM7150 register addresses.
++ * They must not access those addresses on SM8635 while its drivers are
++ * being ported. Device identity reported to iOS is the same on both boards,
++ * so use the SoC compatible string rather than the iPhone model. */
++static bool
++sweet_legacy_peripherals(void)
++{
++	DTEntry root;
++	const char *compat;
++	unsigned size;
++	if (SecureDTLookupEntry(NULL, "/", &root) != kSuccess ||
++	    SecureDTGetProperty(root, "compatible", (const void **)&compat, &size) != kSuccess) {
++		return true;
++	}
++	for (unsigned off = 0; off < size;) {
++		size_t len = strnlen(compat + off, size - off);
++		if (len == size - off) {
++			break;
++		}
++		if (strcmp(compat + off, "qcom,sm8635") == 0) {
++			return false;
++		}
++		off += (unsigned)len + 1;
++	}
++	return true;
++}
++
+ static int
+ sweet_ufs_init(void)
+ {
+@@ -1072,9 +1099,13 @@
+ 	sweet_log_start();
+ 	sweet_sample_start();
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+-	sweet_keys_init();
+-	sweet_touch_init();
+-	sweet_usb_probe();
++	if (sweet_legacy_peripherals()) {
++		sweet_keys_init();
++		sweet_touch_init();
++		sweet_usb_probe();
++	} else {
++		printf("SWEET PERIPHERALS: SM8635; SM7150 key/touch/USB probes withheld\n");
++	}
+ 	return 0;
+ }
+ 
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -170,12 +170,13 @@
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	if (!native) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+-	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+-	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	/* Crop on smaller panels, center without scaling on larger panels. */
++	fOffX = ((int32_t)fLogicalW - (int32_t)fWidth) / 2;
++	fOffY = ((int32_t)fLogicalH - (int32_t)fHeight) / 2;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
