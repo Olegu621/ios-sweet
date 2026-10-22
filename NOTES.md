@@ -403,6 +403,26 @@ step is the remaining unknown).
 `fastboot boot` (10:05, boot partitions untouched). The phone is in iOS with
 the lock screen; to get back to fastboot use power + volume-down.
 
+### Patch 0093: SPMI PMIC read probe (in progress)
+
+- New file `bsd/dev/sweet_spmi.c` + a call in `sweet_ufs_init()` right after
+  `sweet_diag_start()`: reads PMK8550 `pon_hlos@0x1300` / RT `0x1310` and
+  PMXR2230 RT `0x8d10` over the SPMI arbiter, **read only** (a wrong QMI
+  encoding can then only produce garbage in the log, never a PMIC write and
+  never a panic). Because the QMI command encoding is not in any public
+  tree, the driver tries five opcode variants and logs every attempt with
+  its result, so one boot tells us which encoding is right.
+- CI **39738587190** success -> `xnu/kernel-0093peridot`.
+- Image `shim/out/shim-boot-0093p.img` (sha256 e77a9440...) built with
+  `ufslogsecs=5 sweetdiagreset=60`: the kernel writes the log to userdata
+  every 5 s and after 60 s saves the log and reboots into the recovery by
+  itself, so the result can be pulled with
+  `tools/sweet-log-pull.sh OUT.txt` without touching the phone.
+- Reference value to compare with: PMK8550 RT (0x1310) reads 0x10 when idle
+  (recorded earlier from the recovery).
+- To run it: put the phone into fastboot (power + volume-down), then
+  `fastboot boot shim/out/shim-boot-0093p.img` and wait ~90 s.
+
 ### Current completion and next port work
 
 1. Kernel panic investigation / safe disk diagnostics / super geometry repair /
