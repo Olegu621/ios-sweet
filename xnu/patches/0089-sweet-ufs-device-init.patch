@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index b8e580f..301f1e6 100644
+index b8e580f..085390c 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -59,10 +59,16 @@ extern void sweet_usb_probe(void);
@@ -111,7 +111,7 @@ index b8e580f..301f1e6 100644
  		}
  		delay(1);
  	}
-@@ -399,41 +435,71 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
+@@ -399,41 +435,77 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
  }
  
  /*
@@ -192,6 +192,12 @@ index b8e580f..301f1e6 100644
  	return ((r != 0xffffffffu) && ((r & 0xffff) == 0)) ? 0 : ENXIO;
  }
  
++static int ufs_nop_out(void);
++static int ufs_fdeviceinit(void);
++static int ufs_query_len(uint8_t opcode, uint8_t idn, uint32_t len,
++    uint32_t value, uint32_t *rsp_value);
++static void ufs_power_mode(void);
++
 +/*
 + * The whole device initialisation the reference driver does before it
 + * talks to the device: a NOP OUT, the fDeviceInit handshake, the device
@@ -210,7 +216,7 @@ index b8e580f..301f1e6 100644
  static int
  ufs_take_over_host(void)
  {
-@@ -707,11 +773,20 @@ sweet_ufs_init(void)
+@@ -707,11 +779,20 @@ sweet_ufs_init(void)
  	if (!error) {
  		error = ufs_link_init();
  	}
