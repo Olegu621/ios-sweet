@@ -242,6 +242,61 @@
   /tmp/opencode/ufsref/koall/modules/ - useful as a cross-check of the
   register/command sequence, but the mainline fts.c is not in v6.1.
 
+### Input port: measured facts and the concrete next step
+
+Measured in the recovery on this phone (root, `tools/peridot-input-facts.sh`):
+
+- **The touch chip does NOT come up in the recovery.** `focaltech_touch.ko` is
+  loaded, but it creates no input device: the only touch-like node is
+  `event7` = `goodix_ts`, a *virtual* device from the `xiaomitouch` helper
+  (Vendor=beef Product=dead). So the real FT3683G needs its own
+  initialisation in our driver - there is no working reference to copy
+  coordinates from, and no firmware/config in the DT (only the goodix
+  `firmware-name`/`config-name` properties exist, and they belong to the
+  old goodix path).
+- **The SPMI bus 0 is alive** and exposes the PMICs:
+  `/sys/bus/spmi/devices/`: `0-00` (PMK8550), `0-01` (PMXR2230), `0-02`,
+  `0-03`, `0-04`, `0-07`, `0-0c`, `0-0d`, plus `2-07`.
+  The arbiter: `cnfg 0xc42d000 (0x4000)`, `core 0xc400000 (0x3000)`,
+  `chnls 0xc500000 (0x400000)`, `obsrvr 0xc440000 (0x80000)`,
+  `intr 0xc4c0000 (0x10000)`, IRQ 0x156.
+  The Linux pmic driver is bound and working: `pmic_pwrkey` (event3) and
+  `pmic_resin` (event4) exist, i.e. **PMK8550 pon_hlos@0x1300 is readable
+  through SPMI** - the NOTES value "recovery idle RT read 0x10" is the
+  reference to compare against.
+- SPI buses are instantiated in the recovery (`spi0.0`, `spi1.0`).
+- The DT SPI node for the panel: `qupv3_se1_spi: spi@a84000`,
+  `compatible = "qcom,spi-geni"`, `reg = <0xa84000 0x4000>`, IRQ
+  `<0x00 0x162 0x04>`, `clock-names = "se-clk"`, `clocks = <0x16e 0x43>`,
+  interconnect names qup-core/qup-config/qup-memory with SPMI ids
+  `0x1a2/0x1a3/0x1a1` (PCR/QMP) and `0x188` (SPMI). This is the same QUP
+  SE1 block the sweet driver used as SE7 I2C at 0xa84000.
+- The Linux reference for this controller is GENI SE SPI
+  (`drivers/spi/spi-geni-qcom.c`, copied to
+  research/diagnostics-20261022/linux-ref/): SE_SPI_CPHA 0x224, CPOL 0x230,
+  DEMUX 0x250, TRANS_CFG 0x25c, WORD_LEN 0x268, TX_TRANS_LEN 0x26c,
+  RX_TRANS_LEN 0x270, DELAY 0x274/0x278, plus GENI_OUTPUT_CTRL 0x24,
+  GENI_CGC_CTRL 0x28 and the SE_DMA_* block at 0xc30+ (qcom-geni-se.c).
+
+**Order of work (each step independently verifiable on the phone):**
+1. `bsd/dev/sweet_spmi.c`: QMI access to the SPMI arbiter (read/write a PMIC
+   register by APID). Verify by reading PMK8550 pon_hlos 0x1300 and RT
+   0x1310 (expect the idle RT value 0x10) and PMXR2230 RT 0x8d10.
+   This also gives us the rails (avdd/vdd of the panel, DT regulators
+   0x34f/0x358) and the QUP clock vote.
+2. Power keys: PMK8550 pon_hlos bit 7 (power) / bit 6 (resin=volume-up),
+   PMXR2230 GPIO6 (volume-up) - reuse the already working
+   `sweet_hid_key()` path so the phone can be rebooted into fastboot from
+   the running iOS.
+3. Touch: QUP GENI SPI master + FT3683G initialisation. Note that the
+   Linux driver only implements the DMA path, and the iOS kernel has no
+   IOMMU, so a FIFO/PIO path or an SMMU bypass has to be worked out. The
+   FocalTech *protocol* is already implemented in `bsd/dev/sweet_touch.c`
+   (`touch_focaltech()`: 63-byte report at register 0x38, 6 bytes per point,
+   12-bit coordinates); only the transport has to change from SE7 I2C to
+   SPI, plus the coordinate scaling from the raw 19520x43424 to the logical
+   1125x2436.
+
 ### Current completion and next port work
 
 1. Kernel panic investigation / safe disk diagnostics / super geometry repair /
