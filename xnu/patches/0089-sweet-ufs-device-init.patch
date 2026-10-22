@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index b8e580f..085390c 100644
+index b8e580f..6569310 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -59,10 +59,16 @@ extern void sweet_usb_probe(void);
@@ -111,7 +111,7 @@ index b8e580f..085390c 100644
  		}
  		delay(1);
  	}
-@@ -399,41 +435,77 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
+@@ -399,39 +435,319 @@ ufs_uic(uint32_t cmd, uint32_t arg0)
  }
  
  /*
@@ -177,11 +177,6 @@ index b8e580f..085390c 100644
 -				break;
 -			}
 -			delay(1);
--		}
--		printf("SWEET UFS: HCS after DME RESET 0x%x\n", hcs);
--	}
--	r = ufs_uic(0x16, 0);                   /* DME LINK STARTUP */
--	printf("SWEET UFS: DME LINK STARTUP result 0x%x\n", r);
 +	r = ufs_uic(0x14, 0, 0, 0, NULL);      /* DME RESET */
 +	printf("SWEET UFS: DME RESET result %u IS 0x%x\n", r, ufs_rd(REG_IS));
 +	r = ufs_uic(0x12, 0, 0, 0, NULL);      /* DME ENABLE */
@@ -189,9 +184,257 @@ index b8e580f..085390c 100644
 +	r = ufs_uic(0x16, 0, 0, 0, NULL);      /* DME LINK STARTUP */
 +	printf("SWEET UFS: DME LINK STARTUP result %u IS 0x%x HCS 0x%x\n",
 +	    r, ufs_rd(REG_IS), ufs_rd(REG_HCS));
- 	return ((r != 0xffffffffu) && ((r & 0xffff) == 0)) ? 0 : ENXIO;
- }
- 
++	return ((r != 0xffffffffu) && ((r & 0xffff) == 0)) ? 0 : ENXIO;
++}
++
++/*
++ * A NOP OUT UPIU (type 0x00).  The reference driver sends it as the very
++ * first thing after the link is up: the device answers with a NOP IN and
++ * that proves it has finished its own initialisation.
++ */
++static int
++ufs_nop_out(void)
++{
++	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
++	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
++	uint64_t ucd_pa = su.dma_pa + DMA_UCD;
++	uint32_t ocs;
++
++	bzero(utrd, sizeof(*utrd));
++	bzero(ucd, sizeof(*ucd));
++
++	ucd->cmd[0] = 0x00;                     /* NOP OUT UPIU */
++	ucd->cmd[3] = ++su.tag;
++
++	utrd->dw0 = (1u << 28) | (1u << 24);    /* CT=1, DD=0, I=1 */
++	utrd->dw2 = 0x0f;
++	utrd->ucdba = (uint32_t)ucd_pa;
++	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
++	utrd->resp = (512u / 4) << 16 | (512u / 4);
++
++	if (su.cache) {
++		dma_clean(DMA_UTRL, sizeof(*utrd));
++		dma_clean(DMA_UCD, 16);
++		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
++	} else {
++		dma_sync(DMA_UTRL, sizeof(*utrd));
++		dma_sync(DMA_UCD, sizeof(*ucd));
++	}
++	__builtin_arm_dsb(0xf);
++
++	ufs_wr(REG_UTRLDBR, 1);
++	uint64_t deadline;
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	while (ufs_rd(REG_UTRLDBR) & 1) {
++		if (mach_absolute_time() > deadline) {
++			ufs_wr(REG_UTRLCLR, ~1u);
++			printf("SWEET UFS: NOP OUT timed out\n");
++			return ETIMEDOUT;
+ 		}
+-		printf("SWEET UFS: HCS after DME RESET 0x%x\n", hcs);
++		delay(1);
+ 	}
+-	r = ufs_uic(0x16, 0);                   /* DME LINK STARTUP */
+-	printf("SWEET UFS: DME LINK STARTUP result 0x%x\n", r);
+-	return ((r != 0xffffffffu) && ((r & 0xffff) == 0)) ? 0 : ENXIO;
++	__builtin_arm_dsb(0xf);
++	ufs_wr(REG_IS, ufs_rd(REG_IS));
++
++	dma_sync(DMA_UTRL, sizeof(*utrd));
++	if (su.cache) {
++		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
++	} else {
++		dma_sync(DMA_UCD, sizeof(*ucd));
++	}
++	ocs = utrd->dw2 & 0xff;
++	printf("SWEET UFS: NOP OUT ocs 0x%x upiu 0x%x\n", ocs, ucd->resp[0]);
++	return ocs ? EIO : 0;
++}
++
++/*
++ * A QUERY request (UPIU type 0x16).  The payload is "struct utp_upiu_query":
++ * opcode, idn, index, selector, reserved, length, value, reserved.  The
++ * answer arrives in the QUERY response UPIU (type 0x36); its value field
++ * sits at offset 20 (12 byte UPIU header + 8).
++ */
++static int
++ufs_query_len(uint8_t opcode, uint8_t idn, uint32_t len, uint32_t value,
++    uint32_t *rsp_value)
++{
++	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
++	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
++	uint64_t ucd_pa = su.dma_pa + DMA_UCD;
++	uint32_t ocs;
++
++	bzero(utrd, sizeof(*utrd));
++	bzero(ucd, sizeof(*ucd));
++
++	ucd->cmd[0] = 0x16;                     /* QUERY REQUEST UPIU */
++	ucd->cmd[1] = 0x00;
++	ucd->cmd[2] = 0x00;                     /* LUN */
++	ucd->cmd[3] = ++su.tag;
++	ucd->cmd[4] = 0x00;                     /* command set type / IID */
++	ucd->cmd[5] = (opcode == 0x05) ? 0x01 : 0x81;   /* query function */
++	/*
++	 * The query payload starts right behind the 12 byte UPIU header
++	 * (struct utp_upiu_query), not behind a data length field like the
++	 * command UPIU has: opcode, idn, index, selector, reserved, length,
++	 * value.
++	 */
++	ucd->cmd[12] = opcode;
++	ucd->cmd[13] = idn;
++	ucd->cmd[14] = 0;                       /* index */
++	ucd->cmd[15] = 0;                       /* selector */
++	ucd->cmd[18] = (uint8_t)(len >> 8);      /* length */
++	ucd->cmd[19] = (uint8_t)len;
++	ucd->cmd[20] = (uint8_t)(value >> 24);
++	ucd->cmd[21] = (uint8_t)(value >> 16);
++	ucd->cmd[22] = (uint8_t)(value >> 8);
++	ucd->cmd[23] = (uint8_t)value;
++
++	/* No data phase: DD = 0, command type 1 (UFS storage device). */
++	utrd->dw0 = (1u << 28) | (1u << 24);
++	utrd->dw2 = 0x0f;                       /* OCS invalid until updated */
++	utrd->ucdba = (uint32_t)ucd_pa;
++	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
++	utrd->resp = (512u / 4) << 16 | (512u / 4);
++
++	if (su.cache) {
++		dma_clean(DMA_UTRL, sizeof(*utrd));
++		dma_clean(DMA_UCD, 24);
++		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
++	} else {
++		dma_sync(DMA_UTRL, sizeof(*utrd));
++		dma_sync(DMA_UCD, sizeof(*ucd));
++	}
++	__builtin_arm_dsb(0xf);
++
++	ufs_wr(REG_UTRLDBR, 1);
++	uint64_t deadline;
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	while (ufs_rd(REG_UTRLDBR) & 1) {
++		if (mach_absolute_time() > deadline) {
++			ufs_wr(REG_UTRLCLR, ~1u);
++			printf("SWEET UFS: QUERY 0x%02x timed out\n", opcode);
++			return ETIMEDOUT;
++		}
++		delay(1);
++	}
++	__builtin_arm_dsb(0xf);
++	ufs_wr(REG_IS, ufs_rd(REG_IS));
++
++	dma_sync(DMA_UTRL, sizeof(*utrd));
++	if (su.cache) {
++		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
++	} else {
++		dma_sync(DMA_UCD, sizeof(*ucd));
++	}
++
++	ocs = utrd->dw2 & 0xff;
++	uint32_t type = ucd->resp[0], rcode = ucd->resp[6];
++	uint32_t v = (ucd->resp[20] << 24) | (ucd->resp[21] << 16) |
++	    (ucd->resp[22] << 8) | ucd->resp[23];
++	if (rsp_value) {
++		*rsp_value = v;
++	}
++	printf("SWEET UFS: QUERY opcode 0x%02x idn 0x%02x: ocs 0x%x type 0x%x code 0x%x value 0x%x\n",
++	    opcode, idn, ocs, type, rcode, v);
++	if (ocs || type != 0x36 || rcode) {
++		return EIO;
++	}
++	return 0;
++}
++
++static int
++ufs_query(uint8_t opcode, uint8_t idn, uint32_t value, uint32_t *rsp_value)
++{
++	return ufs_query_len(opcode, idn, 0, value, rsp_value);
++}
++
++
++/*
++ * START STOP UNIT on the well known "device" LUN (the UPIU LUN byte of
++ * SCSI LUN 0xc150 is 0xd0).  The power condition modifier selects the
++ * device power mode: 0x00 active, 0x10 sleep, 0x20 power down.  Going
++ * down and up again is the UFS level equivalent of the VCC toggle the
++ * reference driver does with the device.
++ */
++static int
++ufs_start_stop(uint8_t pcm)
++{
++	uint8_t cdb[6] = { 0x1e, 0, 0, 0, pcm, 0 };
++	uint8_t lun = su.lun;
++	int error;
++
++	su.lun = 0xd0;                          /* the well known device LUN */
++	error = ufs_scsi(cdb, sizeof(cdb), 0, false);
++	su.lun = lun;
++	printf("SWEET UFS: START STOP UNIT pcm 0x%x: %s\n", pcm,
++	    error ? "refused" : "ok");
++	return error;
++}
++
++/*
++ * The UFS 3.0/4.0 device initialisation handshake: the host sets the
++ * fDeviceInit flag and waits for the device to clear it again (Linux
++ * ufshcd_complete_dev_init).  The device descriptor of this UFS 4.0 part
++ * says bInitialPowerMode = 01h, i.e. the device comes up in Sleep power
++ * mode and answers every SCSI command with CHECK CONDITION / NOT READY
++ * until the host has moved it out of it.
++ */
++static int
++ufs_fdeviceinit(void)
++{
++	uint32_t v = 0, r;
++
++	r = ufs_query(0x06, 0x01, 0, NULL);     /* SET_FLAG fDeviceInit */
++	printf("SWEET UFS: fDeviceInit set result %u\n", r);
++	for (int i = 0; i < 50; i++) {
++		v = 0xffffffff;
++		r = ufs_query(0x05, 0x01, 0, &v); /* READ_FLAG fDeviceInit */
++		printf("SWEET UFS: fDeviceInit read result %u value 0x%x\n", r, v);
++		if (r == 0 && !(v & 1)) {
++			return 0;
++		}
++	}
++	return EIO;
++}
++
++/*
++ * Configure the M-PHY for the negotiated gear and move the device into the
++ * Fast power mode (Linux ufshcd_dme_change_power_mode).  The PA layer
++ * attribute numbers are the UniPro 1.8 ones (JESD220).
++ */
++static void
++ufs_power_mode(void)
++{
++	uint32_t lanes_rx = 0, lanes_tx = 0, gear_rx = 0, gear_tx = 0, v = 0;
++
++	ufs_dme_get(0x1581, &lanes_rx);         /* PA_CONNECTEDRXDATALANES */
++	ufs_dme_get(0x1561, &lanes_tx);         /* PA_CONNECTEDTXDATALANES */
++	ufs_dme_get(0x1587, &gear_rx);          /* PA_MAXRXHSGEAR */
++	ufs_uic(0x03, 0x1587 << 16, 0, 0, &gear_tx);   /* peer: PA_MAXRXHSGEAR */
++	if (!gear_tx) {
++		gear_tx = gear_rx;
++	}
++	ufs_dme_get(0x1571, &v);                /* PA_PWRMODE */
++	printf("SWEET UFS: lanes %u/%u gears %u/%u power mode 0x%x\n",
++	    lanes_rx, lanes_tx, gear_rx, gear_tx, v);
++
++	ufs_dme_set(0x1583, gear_rx);           /* PA_RXGEAR */
++	ufs_dme_set(0x1580, lanes_rx);          /* PA_ACTIVERXDATALANES */
++	ufs_dme_set(0x1584, 1);                 /* PA_RXTERMINATION */
++	ufs_dme_set(0x1568, gear_tx);           /* PA_TXGEAR */
++	ufs_dme_set(0x1560, lanes_tx);          /* PA_ACTIVETXDATALANES */
++	ufs_dme_set(0x1569, 1);                 /* PA_TXTERMINATION */
++	ufs_dme_set(0x156a, 2);                 /* PA_HSSERIES: rate B */
++	ufs_dme_set(0x1571, 0x11);              /* PA_PWRMODE: fast / fast */
++	ufs_dme_get(0x1571, &v);
++	printf("SWEET UFS: power mode now 0x%x\n", v);
++}
++
 +static int ufs_nop_out(void);
 +static int ufs_fdeviceinit(void);
 +static int ufs_query_len(uint8_t opcode, uint8_t idn, uint32_t len,
@@ -211,12 +454,10 @@ index b8e580f..085390c 100644
 +	ufs_query_len(0x01, 0x00, 0x40, 0, NULL);  /* device descriptor */
 +	ufs_query_len(0x01, 0x01, 0x20, 0, NULL);  /* configuration descriptor */
 +	ufs_power_mode();
-+}
-+
+ }
+ 
  static int
- ufs_take_over_host(void)
- {
-@@ -707,11 +779,20 @@ sweet_ufs_init(void)
+@@ -707,11 +1023,20 @@ sweet_ufs_init(void)
  	if (!error) {
  		error = ufs_link_init();
  	}
